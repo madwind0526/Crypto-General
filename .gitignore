@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.tmp/
+.tmp-*.log
+data/market/*.json
+data/local/**
+!data/local/
+!data/local/traders/
+!data/local/traders/.gitkeep
+public/market/*.json

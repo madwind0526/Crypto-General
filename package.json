@@ -1,0 +1,35 @@
+{
+  "name": "crypto-currency-trading",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "fetch:upbit": "node scripts/fetch-upbit-market-data.mjs",
+    "fetch:upbit:top30": "node scripts/fetch-upbit-top30.mjs",
+    "fetch:upbit:top30:chunk0": "node scripts/fetch-upbit-top30-chunk.mjs 0",
+    "fetch:upbit:top30:chunk1": "node scripts/fetch-upbit-top30-chunk.mjs 1",
+    "fetch:upbit:top30:chunk2": "node scripts/fetch-upbit-top30-chunk.mjs 2",
+    "merge:upbit:top30": "node scripts/merge-upbit-market-chunks.mjs",
+    "build:dashboard-cache": "node scripts/build-dashboard-market-cache.mjs",
+    "build:dashboard-results": "node scripts/build-dashboard-results.mjs",
+    "persist:traders": "node scripts/persist-trader-plans.mjs",
+    "paper:sim": "node scripts/paper-trading-sim.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "lightweight-charts": "^5.0.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^4.1.6"
+  }
+}
