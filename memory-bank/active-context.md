@@ -2,7 +2,7 @@
 
 ## Current Work
 
-The project now has an initial Vite + React + TypeScript application skeleton. It includes an Upbit public-data adapter, sample data fallback, technical indicators, four strategy modules, scenario preset optimization, a deterministic backtest runner, and a dashboard comparing strategy results on cached real Upbit public candles.
+The project now has an initial Vite + React + TypeScript application skeleton. It includes an Upbit public-data adapter, sample data fallback, technical indicators, four strategy modules, scenario preset optimization, a deterministic backtest runner, and a left-menu dashboard for scenario building, reports, and daily operation simulation on cached real Upbit public candles.
 
 ## Latest Decisions
 
@@ -41,7 +41,47 @@ The project now has an initial Vite + React + TypeScript application skeleton. I
 - Backtest results can now be viewed as a strict/ignored guide-rule split in the dashboard summary.
 - The D trader now has a pure anomaly monitoring module: `src/simulation/anomalyMonitor.ts`. It builds daily anomaly monitoring plans from historical candidates and detects latest-candle volume/acceleration/breakout signals.
 - A reusable daily operation decision engine exists in `src/simulation/dailyOperation.ts`. It chooses hold/buy/sell/rotate from ranked signals and the current position.
-- The dashboard now exposes a `Guide rules` selector, summary monitoring-selection cards, strict/ignored comparison, anomaly monitoring preview, and a per-trader monitoring selection table.
+- The dashboard now uses a two-pane layout: a persistent left menu and a right workspace for login placeholder, scenario building, reports, and Daily Operation Simulation.
+- Daily Operation Simulation has four views: General-A, General-B, General-C, and anomaly. Each view has a Guideline O/X toggle and centers on the selected 12 monitoring charts.
+- Clicking a Daily Operation chart opens a popup with a large graph, trade history, hourly return table, and hourly balance table across the four strategy cases.
+- Scenario and guideline screens expose import/export controls as UI hooks. Import currently reads the selected JSON filename; validation and applying imported strategy files are still pending.
+- Korean UI strings in trader profiles and strategy-refresh labels were repaired after previous mojibake.
+- Daily Operation now prefers a dedicated 1-minute cache at `public/market/upbit-krw-1m-daily.json` when present, falling back to the 5-minute dashboard cache otherwise.
+- Added `npm run fetch:upbit:1m:daily` to fetch recent 1-minute candles for the union of selected monitoring markets.
+- Added `npm run paper:sim:1m:daily` to run all four traders in strict and ignored guide-rule modes over the latest 1-minute daily cache.
+- Latest 1-minute daily simulation used 26 selected Upbit KRW markets, max 1,440 candles. Results: General-A strict +0.58%, ignored -4.53%; General-B strict -0.77%, ignored -6.79%; General-C strict +1.95%, ignored -1.72%; anomaly strict/ignored 0.00% with no trades.
+- General scenario Report now shows A, B, and C as separate report sections with their own metrics and monitoring selections.
+- The strategy refresh UI is split into General Refresh and Anomaly Refresh. The Vite refresh API accepts `scope=general` for the heavier top-30/5m optimization pipeline and `scope=anomaly` for the 1m daily fetch plus 1m paper simulation flow.
+- Daily Operation cards are sorted by the latest visible candle return, so each refresh redraws the 12 charts in return order. This is cheap because only 12 cards are sorted client-side.
+- Daily Operation chart cards now pass 1-minute paper-simulation trades to `MarketChart`, so buy/sell markers appear as `B` and `S` symbols on mini and large charts when trades exist.
+- The Daily Operation popup now uses a scrolled trade-history table and SVG trend graphs for return and balance instead of only tabular hourly values.
+- General scenario screens no longer show A/B/C details all at once. General scenario building and General scenario Report now use A/B/C choice tabs and display only the selected General strategy detail.
+- General scenario Report shows the selected strategy's top RANK table as the top 3 candidates, while the lower PICK table still shows all 12 selected monitoring candidates.
+- Daily Operation now has an independent Auto Block O/X selector beside Guideline O/X. The current decision layer treats the four cases as Guideline O/X x Auto Block O/X and blocks risky buy signals into hold when auto-block is enabled.
+- Daily Operation chart cards now separate interactions: clicking a card opens only that market's large graph, while each card's Trades/Return/Balance buttons open a current-scenario aggregate popup across the 12 monitored markets. The aggregate popup filters by Guideline O/X and Safety O/X; trade history is chronological across the 12 markets, return trends show only traded markets, and balance trends show the selected scenario's total portfolio balance.
+- Daily Operation summary removed the redundant Case tile and now shows the four remaining summary tiles in one compact desktop row.
+- Daily Operation removed per-card Trades/Return/Balance buttons from inside chart cards; the aggregate buttons now live in the 12-market panel header.
+- Daily Operation return trend lines now use a stable color per market, while Guideline/Safety combinations are distinguished by line patterns.
+- Daily Operation return trend legends are split into Coin color labels and Guideline/Safety line-style labels.
+- Daily Operation trend graphs now show y-axis tick labels and horizontal guide lines for return and balance views.
+- Daily Operation chart markers now use the same Safety O/X filtered trade set as the aggregate Trades popup, so blocked trades no longer appear on cards when Safety O is active.
+- Daily Operation card ordering now prioritizes markets with Safety-filtered daily paper trades, then sorts those markets by per-market daily paper return; non-traded markets fall back to current candle-window return.
+- The redundant Daily Operation 기준 panel was removed from Daily Operation screens.
+- Daily Operation sidebar entries now show only the scenario names; redundant Guideline O/X captions were removed.
+- The app now polls Daily Operation market cache and paper simulation results every 15 seconds, so marathon test updates automatically refresh cards, graphs, trade tables, return trends, and balance trends.
+- The app stores the active sidebar screen in localStorage, so browser refresh returns to the screen the user was viewing instead of Summary.
+- Daily Operation Balance trend popups now default to Guideline All / Safety All, and large/trend charts reserve more y-axis label space so price and balance labels are not clipped.
+- Daily Operation Guideline O/X and Auto Block O/X controls are synchronized across General-A, General-B, General-C, and anomaly screens; changing one Daily scenario changes the same mode on the others.
+- Report screens now show both Guideline O/X and Auto Block O/X controls, synchronized with Daily Operation. Daily Operation card return labels now match the sorting rule: traded markets show daily paper return, while non-traded markets show the fallback price-window return.
+- A 24-hour day-trading marathon simulation was started in the background on 2026-05-14 16:45 KST. Runtime status is written to `data/local/paper-trading-1m-daily/marathon-status.json`; logs are under `data/local/paper-trading-1m-daily/logs/`.
+- Daily anomaly operation should not continuously rotate monitoring symbols during a marathon run. The preferred operating model is to choose the 12 anomaly monitoring symbols once per day at a fixed scheduled time, keep the previously backtested strategy/scenario assignment during the day, and only change strategy parameters through an explicit Strategy Refresh.
+- The first marathon run was paused at cycle 167 for code-review fixes. Applied fixes include Upbit retry/backoff wrappers in the TS client and marathon/fetch scripts, explicit anomaly lookback guards, binary-search candle lookup in paper trading, momentum max ATR as a scenario parameter, corrected arbitrage z-score calculation, KST UI time formatting, and repair of broken UI strings.
+- Daily Operation now shows card top-right as the current price return from the visible daily baseline, and the card summary as BUY/SELL/BLOCK counts plus the coin's paper return. The large market popup shows the same current-return and trade-summary metrics. Daily Operation top summary now shows best coin, best coin trade counts, best coin return, and total portfolio return for the active Guideline/Safety setting.
+- UI terminology now presents Auto Block as Safety. Base Guideline was renamed to Base Guideline/Safety, exposes Guideline O/X and Safety O/X buttons, and those controls synchronize with reports and Daily Operation screens. The General Scenario Report no longer renders the extra Monitoring Selection Summary block at the bottom.
+- Daily Operation daily metrics now reset at 00:00 KST every day. Card current-return, BUY/SELL/BLOCK counts, per-coin paper return, aggregate trade tables, return trends, and balance trends only include events from the active KST day, so the longest daily window is 24 hours before it resets.
+- Summary middle report now renders a compact Guideline/Safety 4-case comparison. Each strategy has one row with O/O, O/X, X/O, and X/X cells showing return, max drawdown, trades, and blocked count. Safety O is currently an estimated overlay that replays the same backtest trades after applying the automatic block rules.
+- A fresh 24-hour marathon run was started on 2026-05-14 21:17 KST with `MARATHON_START_AT_KST=2026-05-14T19:15:00+09:00` and `MARATHON_RESET_CACHE=true`. The 1-minute daily cache was reset so chart x-axes start no earlier than 2026-05-14 19:15 KST.
+- MarketChart now formats lightweight-charts x-axis ticks and crosshair time labels in Asia/Seoul, so the chart axis no longer shows UTC while custom tooltips show KST.
 - Trader optimization outputs are persisted under `data/local/traders/<trader>/`. Paper simulation outputs are persisted under `data/local/paper-trading/<trader>/`.
 
 ## Important Assumptions

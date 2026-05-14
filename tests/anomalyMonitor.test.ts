@@ -34,6 +34,16 @@ describe("anomaly monitor", () => {
     expect(plan.monitoringMarkets[0].market).toBe("KRW-SPIKE");
     expect(plan.latestSignals[0].market).toBe("KRW-SPIKE");
   });
+
+  it("does not score partial lookback windows", () => {
+    const signal = detectAnomalySignal(createCandles("KRW-SHORT", 12, { finalSpike: true }), 11, {
+      breakoutLookbackCandles: 36,
+      extensionLookbackCandles: 72,
+      volumeLookbackCandles: 24,
+    });
+
+    expect(signal).toBeNull();
+  });
 });
 
 function createCandles(

@@ -1,7 +1,7 @@
 import { createSampleMarketSet } from "./sampleData";
 import type { StrategyComparison, StrategyGuideModeComparison } from "../simulation/optimizer";
 import type { TraderOptimizationPlan } from "../simulation/traderOptimization";
-import type { Candle } from "../types/trading";
+import type { Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
 
 export interface DashboardMarketData {
   source: string;
@@ -18,6 +18,41 @@ export interface DashboardResults {
   guideModeComparisons: StrategyGuideModeComparison[];
   optimizationPlans: TraderOptimizationPlan[];
   optimizationPlansByGuideMode?: Record<"strict" | "ignored", TraderOptimizationPlan[]>;
+}
+
+export interface DailyPaperResult {
+  strategyId: TraderId;
+  strategyName: string;
+  guideRuleMode: GuideRuleMode;
+  startedAt: number;
+  endedAt: number;
+  initialCash: number;
+  finalValue: number;
+  returnRate: number;
+  trades: Trade[];
+  decisions: Array<{
+    timestamp: number;
+    action: "hold" | "buy" | "sell" | "rotate";
+    buyMarket?: string;
+    sellMarket?: string;
+    portfolioValue: number;
+    cash: number;
+    positionMarket?: string;
+    reasonCodes: string[];
+  }>;
+  equityCurve: Array<{ timestamp: number; value: number }>;
+}
+
+export interface DailyPaperResultsPayload {
+  generatedAt: string;
+  marketCache: {
+    path: string;
+    generatedAt?: string;
+    candleUnitMinutes?: number;
+    selectedMarkets?: string[];
+  };
+  maxCandles: number;
+  results: Record<GuideRuleMode, Partial<Record<TraderId, DailyPaperResult>>>;
 }
 
 interface UpbitMarketCachePayload {
@@ -42,6 +77,29 @@ export async function loadDashboardMarketData(): Promise<DashboardMarketData> {
   }
 
   return loadSampleMarketData();
+}
+
+export async function loadDailyOperationMarketData(): Promise<DashboardMarketData | null> {
+  const cached = await fetchMarketCache("/market/upbit-krw-1m-daily.json");
+  if (!cached) return null;
+
+  return {
+    source: `${cached.source}:${cached.candleUnitMinutes}m`,
+    generatedAt: cached.generatedAt,
+    markets: cached.selectedMarkets,
+    candlesByMarket: cached.candlesByMarket,
+    isRealUpbitData: true,
+  };
+}
+
+export async function loadDailyPaperResults(): Promise<DailyPaperResultsPayload | null> {
+  try {
+    const response = await fetch("/market/paper-trading-1m-daily-results.json", { cache: "no-store" });
+    if (!response.ok) return null;
+    return (await response.json()) as DailyPaperResultsPayload;
+  } catch {
+    return null;
+  }
 }
 
 export function loadSampleMarketData(): DashboardMarketData {

@@ -142,6 +142,17 @@ Current implementation status:
 - `buildTraderOptimizationPlan` can run the required A/B/C flow in memory: candidate markets by trade value, per-market scenario optimization, and selected monitoring markets.
 - `compareStrategiesByGuideMode` is connected to the dashboard summary so strict and ignored modes can be compared side by side.
 - `src/simulation/dailyOperation.ts` implements the current-position loop for hold, buy, sell, and rotate decisions.
+- `src/app/App.tsx` presents the product as a left-menu/two-pane tool surface for scenario building, reports, guideline review, and four Daily Operation Simulation screens.
+- Daily Operation screens are mapped as General-A -> momentum, General-B -> range/grid, General-C -> relative/arbitrage proxy, and anomaly -> anomaly signal trader. Each has a Guideline O/X toggle and a 12-chart monitoring board.
+- Daily chart popups expose large graph, trade history, hourly returns for all four scenarios, and hourly balance for all four scenarios.
+- Scenario/guideline import/export controls are present as UI hooks; persistence validation and applying imported files remain future work.
+- Daily Operation screens prefer `public/market/upbit-krw-1m-daily.json` when available. The 5-minute cache remains the report/backtest cache and fallback.
+- `fetch:upbit:1m:daily` reads the current selected-symbol files, builds the selected-market union, and fetches recent 1-minute candles.
+- `paper:sim:1m:daily` runs all four traders in strict and ignored guide-rule modes on the 1-minute daily cache and writes summaries under `data/local/paper-trading-1m-daily/`.
+- `paper:sim:1m:daily` also writes `public/market/paper-trading-1m-daily-results.json` so the browser can use 1-minute paper trades and equity curves.
+- General and anomaly refreshes are separate UI/API paths: General runs the full 5-minute top-30 optimization pipeline; anomaly runs the selected-market 1-minute daily fetch and 1-minute paper simulation.
+- General Scenario Report is split into General-A, General-B, and General-C sections.
+- Daily Operation cards sort by latest candle-window return and chart popups show scrolled trade history plus return/balance SVG trend graphs.
 - True grid/random parameter search and walk-forward validation are still pending.
 
 - Optimize on an in-sample historical window.

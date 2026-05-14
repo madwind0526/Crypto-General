@@ -97,10 +97,31 @@
 - Added a local strategy refresh API and Summary button concept: `전략 재실행` starts top-30 chunk fetch, merge, trader persistence, dashboard cache build, and dashboard results build with a progress overlay. The dev server must be restarted after this Vite config change.
 - Made the individual trader overview/result section and monitoring-selection table collapsible, with both sections closed by default.
 - Fixed guide-rule mode selection for individual trader screens by adding strict/ignored result sets to `dashboard-results.json`; the UI now switches displayed comparisons and monitoring selections without rerunning browser backtests.
+- Reworked the UI into a left-menu/two-pane application shell.
+- Added menu entries for login placeholder, General scenario builder, anomaly scenario builder, guideline overview, Summary report, General report, anomaly report, and four Daily Operation Simulation screens.
+- Added scenario/guideline import and export UI hooks. Export downloads current plan/policy JSON; import currently records the chosen file name for later validation/application.
+- Added Daily Operation views for General-A, General-B, General-C, and anomaly, each with a Guideline O/X toggle and 12 selected monitoring charts.
+- Added chart-click popup tabs for large graph, trade history, hourly returns, and hourly balance across all four scenario cases.
+- Repaired Korean-facing trader profile text and strategy refresh labels.
+- Verified `npm run test` and `npm run build` after the left-menu UI pass.
+- Added a 1-minute Daily Operation data path: `npm run fetch:upbit:1m:daily` fetches the selected monitoring-market union into `data/market/upbit-krw-1m-daily.json` and `public/market/upbit-krw-1m-daily.json`.
+- Added `npm run paper:sim:1m:daily` to run General-A/B/C and anomaly simulations in both Guideline O/X modes on the latest 1-minute cache.
+- Fetched 1-minute daily candles for 26 selected markets and ran the 1,440-step paper simulation. Results: momentum strict +0.58%, momentum ignored -4.53%, range-grid strict -0.77%, range-grid ignored -6.79%, arbitrage strict +1.95%, arbitrage ignored -1.72%, anomaly strict/ignored 0.00%.
+- Verified `npm run test` and `npm run build` after adding the 1-minute Daily Operation flow.
+- Split the top-bar refresh controls into General Refresh and Anomaly Refresh. The API now dispatches to separate step lists based on `scope=general` or `scope=anomaly`.
+- Updated the General Scenario Report to render A, B, and C as separate report sections instead of only one combined table.
+- Daily Operation cards now sort by current candle-window return, and the cost is negligible because the UI sorts only 12 cards after data refresh.
+- Daily Operation charts now receive 1-minute paper-simulation trades; chart markers show `B` for buy and `S` plus round-trip return for sell.
+- Daily Operation popups now provide a scrolled trade-history table plus return and balance trend graphs.
+- Re-ran `paper:sim:1m:daily`, `npm run test`, and `npm run build`; all passed.
+- Changed General scenario building and General scenario Report from all-A/B/C expanded layouts to A/B/C selectable tabs that show only the selected strategy detail.
+- Adjusted General scenario Report so the upper RANK table shows the top 3 candidates and the lower PICK table continues to show all 12 selected monitoring candidates.
+- Added Daily Operation Auto Block O/X selection beside Guideline O/X. Auto Block currently applies in the decision layer by converting risky buy signals to hold, creating four visible daily operation cases.
+- Changed Daily Operation popups so Trades/Return/Balance operate at the active scenario level instead of per chart. The popup now scopes to the active trader only, covers all 12 monitored markets, and provides Guideline/Safety filters for chronological trade history, traded-market return trends, and total balance trends.
 
 ## Current Status
 
-Initial implementation is underway. The app skeleton and strategy/backtest core exist, dependencies are installed, test/build/audit verification passed, and the dashboard now uses 90 days of cached Upbit public 5-minute candle data loaded from JSON.
+Initial implementation is underway. The app skeleton and strategy/backtest core exist, dependencies are installed, test/build/audit verification passed, and the dashboard now uses a left-menu layout with 90 days of cached Upbit public 5-minute candle data loaded from JSON.
 
 ## Remaining Work
 
@@ -112,6 +133,12 @@ Initial implementation is underway. The app skeleton and strategy/backtest core 
 - Add compressed anomaly history files and daily retention pruning.
 - Add UI loading from persisted `data/local/traders/<trader>/` outputs instead of recalculating every dashboard load.
 - Persist strict versus ignored guide-rule comparison outputs under `data/local/traders/<trader>/`.
+- Show persisted 1-minute paper simulation summaries directly inside the Daily Operation screens.
+- Updated Daily Operation cards and market popups so the top-right number is the current baseline price return, while the trade summary shows BUY/SELL/BLOCK counts plus per-coin paper return. The Daily Operation header now summarizes best coin, best coin trade counts, best coin return, and active-case total return.
+- Renamed Auto Block UI wording to Safety, added Safety O/X to Base Guideline/Safety, synchronized those toggles across reports and Daily Operation, removed the redundant General Report monitoring summary, and repaired remaining broken Korean UI strings.
+- Changed Daily Operation baseline logic to reset at 00:00 KST. Daily card returns, trade summaries, popup trade lists, return trends, and balance trends now use only the current KST day's data.
+- Replaced the Summary page's middle comparison with a compact Guideline/Safety 4-case comparison table: Guideline O/Safety O, Guideline O/Safety X, Guideline X/Safety O, and Guideline X/Safety X. Each cell shows return, max drawdown, trades, and blocked count.
+- Restarted the 24-hour marathon test from a fixed KST chart baseline: cache reset from 2026-05-14 19:15 KST, first cycle completed, and the runtime status is running under `data/local/paper-trading-1m-daily/marathon-status.json`.
 - Expand guide-rule filters with more exact pattern detection from `GUIDERULES.md`.
 - Add active trade markers directly on chart candles using backtest/paper-trading trade events.
 - Build market-data ingestion and local cache.

@@ -3,7 +3,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { spawn } from "node:child_process";
 
-const refreshSteps = [
+const refreshStepSets = {
+  general: [
   { label: "Fetch top-30 chunk 0 / latest 30 days", script: "fetch:upbit:top30:chunk0" },
   { label: "Fetch top-30 chunk 1 / 30-60 days", script: "fetch:upbit:top30:chunk1" },
   { label: "Fetch top-30 chunk 2 / 60-90 days", script: "fetch:upbit:top30:chunk2" },
@@ -11,7 +12,12 @@ const refreshSteps = [
   { label: "Persist trader optimization plans", script: "persist:traders" },
   { label: "Build dashboard candle cache", script: "build:dashboard-cache" },
   { label: "Build dashboard results", script: "build:dashboard-results" },
-];
+  ],
+  anomaly: [
+    { label: "Fetch selected-market 1m daily candles", script: "fetch:upbit:1m:daily" },
+    { label: "Run 1m daily paper simulation", script: "paper:sim:1m:daily" },
+  ],
+};
 
 const refreshState = {
   completedAt: "",
@@ -19,9 +25,10 @@ const refreshState = {
   logs: [],
   progress: 0,
   running: false,
+  scope: "idle",
   stepIndex: 0,
   stepLabel: "Idle",
-  totalSteps: refreshSteps.length,
+  totalSteps: refreshStepSets.general.length,
 };
 
 function strategyRefreshPlugin() {
@@ -45,21 +52,26 @@ function strategyRefreshPlugin() {
           return;
         }
 
-        runRefreshJob();
+        const url = new URL(req.url ?? "", "http://127.0.0.1");
+        const scope = url.searchParams.get("scope") === "anomaly" ? "anomaly" : "general";
+        runRefreshJob(scope);
         sendJson(res, refreshState);
       });
     },
   };
 }
 
-async function runRefreshJob() {
+async function runRefreshJob(scope) {
+  const refreshSteps = refreshStepSets[scope] ?? refreshStepSets.general;
   refreshState.completedAt = "";
   refreshState.error = "";
   refreshState.logs = [];
   refreshState.progress = 0;
   refreshState.running = true;
+  refreshState.scope = scope;
   refreshState.stepIndex = 0;
   refreshState.stepLabel = "Starting";
+  refreshState.totalSteps = refreshSteps.length;
 
   try {
     for (let index = 0; index < refreshSteps.length; index += 1) {

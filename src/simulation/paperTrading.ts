@@ -248,10 +248,32 @@ function getSimulationTimestamps(candleSets: Candle[][]) {
 
 function findCandleIndexAtOrBefore(candles: Candle[], timestamp: number, startIndex: number) {
   if (candles.length === 0) return -1;
-  let index = Math.min(Math.max(0, startIndex), candles.length - 1);
-  while (index < candles.length - 1 && candles[index + 1].timestamp <= timestamp) index += 1;
-  while (index > 0 && candles[index].timestamp > timestamp) index -= 1;
-  return candles[index].timestamp <= timestamp ? index : -1;
+  const boundedStart = Math.min(Math.max(0, startIndex), candles.length - 1);
+  if (candles[boundedStart].timestamp <= timestamp) {
+    const nextIndex = boundedStart + 1;
+    if (nextIndex >= candles.length || candles[nextIndex].timestamp > timestamp) return boundedStart;
+    return findLastIndexAtOrBefore(candles, timestamp, nextIndex, candles.length - 1);
+  }
+
+  return findLastIndexAtOrBefore(candles, timestamp, 0, boundedStart);
+}
+
+function findLastIndexAtOrBefore(candles: Candle[], timestamp: number, low: number, high: number) {
+  let left = low;
+  let right = high;
+  let result = -1;
+
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2);
+    if (candles[middle].timestamp <= timestamp) {
+      result = middle;
+      left = middle + 1;
+    } else {
+      right = middle - 1;
+    }
+  }
+
+  return result;
 }
 
 function getPortfolioValue(

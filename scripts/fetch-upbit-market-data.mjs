@@ -19,6 +19,7 @@ const DERIVED_CANDLE_PAGES =
 const CANDLE_PAGES = Number(process.env.UPBIT_CANDLE_PAGES ?? DERIVED_CANDLE_PAGES);
 const MARKET_COUNT = Number(process.env.UPBIT_MARKET_COUNT ?? 30);
 const REQUEST_DELAY_MS = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 180);
+const MAX_RETRIES = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
 const WRITE_PUBLIC_CACHE = process.env.UPBIT_WRITE_PUBLIC !== "false";
 const PRETTY_JSON = process.env.UPBIT_PRETTY_JSON !== "false";
 const ANCHOR_TIMESTAMP = process.env.UPBIT_ANCHOR_ISO ? new Date(process.env.UPBIT_ANCHOR_ISO).getTime() : Date.now();
@@ -173,16 +174,42 @@ async function fetchTickers(markets) {
 }
 
 async function fetchJson(pathname) {
-  const response = await fetch(`${UPBIT_BASE_URL}${pathname}`, {
-    headers: { Accept: "application/json" },
-  });
+  let lastError = null;
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${UPBIT_BASE_URL}${pathname}`, {
+        headers: { Accept: "application/json" },
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === MAX_RETRIES) break;
+      await sleep(getRetryDelayMs(null, attempt));
+      continue;
+    }
+
+    if (response.ok) return response.json();
+
     const text = await response.text();
-    throw new Error(`Upbit request failed ${response.status}: ${text}`);
+    lastError = new Error(`Upbit request failed ${response.status}: ${text}`);
+    if (!shouldRetry(response.status) || attempt === MAX_RETRIES) break;
+
+    await sleep(getRetryDelayMs(response, attempt));
   }
 
-  return response.json();
+  throw lastError;
+}
+
+function shouldRetry(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function getRetryDelayMs(response, attempt) {
+  const retryAfter = response?.headers?.get("retry-after");
+  const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : 0;
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return retryAfterMs;
+  return Math.min(8_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
 }
 
 function sleep(ms) {

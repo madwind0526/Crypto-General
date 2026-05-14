@@ -106,10 +106,14 @@ export function detectAnomalySignal(
 
   const current = sorted[index];
   const volumeWindow = sorted.slice(index - resolved.volumeLookbackCandles, index);
+  const breakoutWindow = sorted.slice(index - resolved.breakoutLookbackCandles, index);
+  if (volumeWindow.length < resolved.volumeLookbackCandles || breakoutWindow.length < resolved.breakoutLookbackCandles) {
+    return null;
+  }
+
   const relativeVolume = current.quoteVolume / Math.max(1, average(volumeWindow.map((candle) => candle.quoteVolume)));
   const accelerationBase = sorted[index - resolved.accelerationLookbackCandles];
   const accelerationReturn = accelerationBase.close > 0 ? (current.close - accelerationBase.close) / accelerationBase.close : 0;
-  const breakoutWindow = sorted.slice(index - resolved.breakoutLookbackCandles, index);
   const previousHigh = Math.max(...breakoutWindow.map((candle) => candle.high));
   const breakout = current.close > previousHigh;
   const extensionBase = sorted[index - resolved.extensionLookbackCandles];

@@ -17,6 +17,12 @@ import { normalizeChartInterval, type ChartInterval } from "../data/candleAggreg
 interface MarketChartProps {
   candles: Candle[];
   interval: ChartInterval;
+  metrics?: {
+    detail?: string;
+    detailClassName?: string;
+    returnRate: number;
+    returnTitle?: string;
+  };
   themeMode: "light" | "dark";
   trades?: Trade[];
   variant?: "mini" | "large";
@@ -27,7 +33,7 @@ interface MeasurementPoints {
   p2: Candle | null;
 }
 
-export function MarketChart({ candles, interval, themeMode, trades = [], variant = "mini" }: MarketChartProps) {
+export function MarketChart({ candles, interval, metrics, themeMode, trades = [], variant = "mini" }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -77,12 +83,17 @@ export function MarketChart({ candles, interval, themeMode, trades = [], variant
         textColor: colors.text,
         fontSize: variant === "mini" ? 10 : 12,
       },
+      localization: {
+        timeFormatter: formatChartTimeLabel,
+      },
       grid: {
         vertLines: { color: colors.grid },
         horzLines: { color: colors.grid },
       },
       rightPriceScale: {
         borderVisible: false,
+        entireTextOnly: true,
+        minimumWidth: variant === "large" ? 92 : 64,
         scaleMargins: {
           top: 0.08,
           bottom: 0.32,
@@ -92,6 +103,7 @@ export function MarketChart({ candles, interval, themeMode, trades = [], variant
         borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: formatChartTimeLabel,
       },
       crosshair: {
         mode: CrosshairMode.Magnet,
@@ -232,7 +244,7 @@ export function MarketChart({ candles, interval, themeMode, trades = [], variant
 
     const visibleTimes = new Set(visibleCandles.map((candle) => candle.timestamp));
     markerSeries.setMarkers([
-      ...createTradeMarkers(trades, visibleCandles, themeMode),
+      ...createTradeMarkers(trades, visibleCandles, themeMode, variant),
       ...(variant === "large" ? createMeasurementMarkers(measurementPoints, visibleTimes, themeMode) : []),
     ]);
   }, [measurementPoints, themeMode, trades, variant, visibleCandles]);
@@ -260,6 +272,14 @@ export function MarketChart({ candles, interval, themeMode, trades = [], variant
     <div className={`market-chart-wrap market-chart-wrap--${variant}`} onWheel={handleWheel}>
       <div className={`market-chart market-chart--${variant}`} ref={containerRef} />
       <div className="market-chart-tooltip" ref={tooltipRef} />
+      {metrics ? (
+        <div className="market-chart-metrics">
+          <span className={metrics.returnRate >= 0 ? "gain" : "loss"} title={metrics.returnTitle}>
+            {formatPct(metrics.returnRate)}
+          </span>
+          {metrics.detail ? <strong className={metrics.detailClassName}>{metrics.detail}</strong> : null}
+        </div>
+      ) : null}
       <div className="market-chart-range">{rangeLabel}</div>
       {variant === "large" ? <MeasurementPanel points={measurementPoints} /> : null}
     </div>
@@ -352,41 +372,38 @@ function createTradeMarkers(
   trades: Trade[],
   visibleCandles: Candle[],
   themeMode: "light" | "dark",
+  variant: "mini" | "large",
 ): SeriesMarker<Time>[] {
   if (trades.length === 0 || visibleCandles.length === 0) return [];
 
   const sortedTrades = trades.slice().sort((a, b) => a.timestamp - b.timestamp);
   const markers: SeriesMarker<Time>[] = [];
-  const buyColor = themeMode === "dark" ? "#6bd0a4" : "#0b7a43";
-  const profitSellColor = themeMode === "dark" ? "#7fb4ff" : "#225fb8";
-  const lossSellColor = themeMode === "dark" ? "#ef8181" : "#b33a3a";
-  let openTrade: Trade | null = null;
+  const buyColor = themeMode === "dark" ? "#00f5a0" : "#008f5a";
+  const sellColor = themeMode === "dark" ? "#ff4f7b" : "#c51f4a";
+  const markerSize = variant === "large" ? 2.4 : 1.8;
 
   for (const trade of sortedTrades) {
     const markerCandle = findVisibleCandleForTrade(visibleCandles, trade.timestamp);
     if (!markerCandle) continue;
 
     if (trade.side === "buy") {
-      openTrade = trade;
       markers.push({
         time: toChartTime(markerCandle.timestamp),
         position: "belowBar",
         shape: "arrowUp",
         color: buyColor,
-        size: 1.2,
+        size: markerSize,
       });
       continue;
     }
 
-    const tradeReturn = openTrade ? getTradeReturn(openTrade, trade) : null;
     markers.push({
       time: toChartTime(markerCandle.timestamp),
       position: "aboveBar",
       shape: "arrowDown",
-      color: tradeReturn !== null && tradeReturn >= 0 ? profitSellColor : lossSellColor,
-      size: 1.2,
+      color: sellColor,
+      size: markerSize,
     });
-    openTrade = null;
   }
 
   return markers;
@@ -399,12 +416,6 @@ function findVisibleCandleForTrade(visibleCandles: Candle[], timestamp: number) 
     selected = candle;
   }
   return selected;
-}
-
-function getTradeReturn(buy: Trade, sell: Trade) {
-  const entryCost = buy.price * buy.quantity + buy.fee;
-  const exitValue = sell.price * sell.quantity - sell.fee;
-  return entryCost === 0 ? 0 : (exitValue - entryCost) / entryCost;
 }
 
 function getVisibleDurationMs(interval: ChartInterval) {
@@ -421,12 +432,27 @@ function toChartTime(timestamp: number): Time {
   return Math.floor(timestamp / 1000) as Time;
 }
 
+function fromChartTime(time: Time) {
+  if (typeof time === "number") return time * 1000;
+  if (typeof time === "string") return Date.parse(`${time}T00:00:00Z`);
+  return Date.UTC(time.year, time.month - 1, time.day);
+}
+
+function formatChartTimeLabel(time: Time) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Seoul",
+  }).format(new Date(fromChartTime(time)));
+}
+
 function formatTooltipTime(timestamp: number) {
   return new Intl.DateTimeFormat("ko-KR", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "Asia/Seoul",
   }).format(new Date(timestamp));
 }
 
@@ -443,6 +469,7 @@ function formatShortDate(timestamp: number) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "Asia/Seoul",
   }).format(new Date(timestamp));
 }
 

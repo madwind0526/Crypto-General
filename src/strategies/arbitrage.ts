@@ -1,4 +1,4 @@
-import { rateOfChange, sma } from "../indicators/technical";
+import { rateOfChange } from "../indicators/technical";
 import type { Candle, Strategy, StrategyContext, StrategyDecision, StrategyScenario } from "../types/trading";
 
 export const arbitrageScenario: StrategyScenario = {
@@ -59,13 +59,15 @@ export const arbitrageStrategy: Strategy = {
     const { candles, candleIndex, position } = context;
     const indicators = getArbitrageIndicators(candles, scenario);
     const window = indicators.returns.slice(Math.max(0, candleIndex - scenario.params.lookback), candleIndex);
-    const average = indicators.averageReturns[candleIndex];
 
-    if (average === null || window.length < scenario.params.lookback) return hold("warming-up");
+    if (window.length < scenario.params.lookback) return hold("warming-up");
 
+    const average = window.reduce((sum, value) => sum + value, 0) / window.length;
     const variance = window.reduce((sum, value) => sum + (value - average) ** 2, 0) / window.length;
     const sd = Math.sqrt(variance);
-    const zScore = sd === 0 ? 0 : (indicators.returns[candleIndex] - average) / sd;
+    if (sd === 0) return hold("flat-relative-window");
+
+    const zScore = (indicators.returns[candleIndex] - average) / sd;
 
     if (position) {
       if (zScore >= scenario.params.zExit || position.holdCandles >= scenario.params.maxHoldCandles) {
@@ -95,7 +97,6 @@ function hold(reason: string): StrategyDecision {
 
 type ArbitrageIndicators = {
   returns: number[];
-  averageReturns: Array<number | null>;
 };
 
 const arbitrageIndicatorCache = new WeakMap<Candle[], Map<string, ArbitrageIndicators>>();
@@ -115,7 +116,6 @@ function getArbitrageIndicators(candles: Candle[], scenario: StrategyScenario): 
   const returns = rateOfChange(closes, 1).map((value) => value ?? 0);
   const indicators = {
     returns,
-    averageReturns: sma(returns, scenario.params.lookback),
   };
   scenarioCache.set(key, indicators);
   return indicators;

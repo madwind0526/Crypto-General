@@ -14,6 +14,7 @@ export const momentumScenario: StrategyScenario = {
     volumeLookback: 24,
     volumeMultiplier: 1.15,
     atrPeriod: 14,
+    maxAtrPct: 0.08,
     stopLossPct: 0.035,
     trailingStopPct: 0.045,
   },
@@ -107,7 +108,7 @@ export const momentumStrategy: Strategy = {
       return hold("position-running");
     }
 
-    if (trendUp && momentumUp && volumeConfirmed && atrPct < 0.08) {
+    if (trendUp && momentumUp && volumeConfirmed && atrPct < scenario.params.maxAtrPct) {
       return {
         action: "buy",
         confidence: 0.78,

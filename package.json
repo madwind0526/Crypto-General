@@ -12,11 +12,14 @@
     "fetch:upbit:top30:chunk0": "node scripts/fetch-upbit-top30-chunk.mjs 0",
     "fetch:upbit:top30:chunk1": "node scripts/fetch-upbit-top30-chunk.mjs 1",
     "fetch:upbit:top30:chunk2": "node scripts/fetch-upbit-top30-chunk.mjs 2",
+    "fetch:upbit:1m:daily": "node scripts/fetch-upbit-1m-daily.mjs",
     "merge:upbit:top30": "node scripts/merge-upbit-market-chunks.mjs",
     "build:dashboard-cache": "node scripts/build-dashboard-market-cache.mjs",
     "build:dashboard-results": "node scripts/build-dashboard-results.mjs",
     "persist:traders": "node scripts/persist-trader-plans.mjs",
     "paper:sim": "node scripts/paper-trading-sim.mjs",
+    "paper:sim:1m:daily": "node scripts/paper-trading-1m-daily.mjs",
+    "paper:marathon:day": "node scripts/day-trading-marathon.mjs",
     "test": "vitest run"
   },
   "dependencies": {
