@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import {
   CandlestickSeries,
   createChart,
@@ -23,7 +23,7 @@ interface MarketChartProps {
   candles: Candle[];
   interval: ChartInterval;
   metrics?: {
-    detail?: string;
+    detail?: ReactNode;
     detailClassName?: string;
     returnRate: number;
     returnTitle?: string;

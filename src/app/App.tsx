@@ -1057,7 +1057,7 @@ function DailyOperationView({
                 </div>
                 <div className="symbol-meta">
                   <span>{label}</span>
-                  <strong className={tradeSummary.returnRate >= 0 ? "gain" : "loss"}>{formatTradeSummary(tradeSummary)}</strong>
+                  <TradeSummaryText summary={tradeSummary} />
                 </div>
                 <MarketChart
                   boundaryTimestamp={operationStartAt}
@@ -1123,8 +1123,8 @@ function MarketInfoPopup({
           candles={aggregated}
           interval={interval}
           metrics={{
-            detail: formatTradeSummary(tradeSummary),
-            detailClassName: tradeSummary.returnRate >= 0 ? "gain" : "loss",
+            detail: <TradeSummaryText summary={tradeSummary} />,
+            detailClassName: "trade-summary",
             returnRate: currentReturn,
             returnTitle: "오늘 기준점 대비 현재가 수익률",
           }}
@@ -2052,6 +2052,23 @@ function buildTradeSummary(trades: Trade[], blocked: number, returnRate: number)
 
 function formatTradeSummary(summary: TradeSummary) {
   return `BUY ${summary.buys} / SELL ${summary.sells} / BLOCK ${summary.blocked} / ${formatPct(summary.returnRate)}`;
+}
+
+function TradeSummaryText({ summary }: { summary: TradeSummary }) {
+  return (
+    <strong className="trade-summary">
+      <span>
+        BUY {summary.buys} / SELL {summary.sells} / BLOCK {summary.blocked} /
+      </span>{" "}
+      <span className={getReturnClassName(summary.returnRate)}>{formatPct(summary.returnRate)}</span>
+    </strong>
+  );
+}
+
+function getReturnClassName(value: number) {
+  if (value > 0) return "gain";
+  if (value < 0) return "loss";
+  return "neutral-return";
 }
 
 function buildDailyOperationSummary(

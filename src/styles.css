@@ -721,6 +721,26 @@ h4 {
   white-space: normal;
 }
 
+.trade-summary {
+  display: inline-flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 3px;
+  color: var(--accent-text);
+}
+
+.trade-summary .gain {
+  color: var(--gain);
+}
+
+.trade-summary .loss {
+  color: var(--loss);
+}
+
+.trade-summary .neutral-return {
+  color: var(--text);
+}
+
 .inline-title {
   display: flex;
   align-items: center;
