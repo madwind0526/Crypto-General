@@ -4,15 +4,18 @@ import type {
   Candle,
   GuideRuleMode,
   Position,
+  SafetyMode,
   Strategy,
   StrategyScenario,
   Trade,
 } from "../types/trading";
 import { defaultBacktestConfig } from "./backtest";
 import { decideDailyOperation, type DailyOperationDecision, type DailySignal } from "./dailyOperation";
+import { evaluateSafetyBlock, getDailyReturnAtCandleIndex } from "./safety";
 import type { TraderOptimizationPlan } from "./traderOptimization";
 
 export interface PaperTradingOptions {
+  autoBlockMode: SafetyMode;
   guideRuleMode: GuideRuleMode;
   maxCandles: number;
   config: BacktestConfig;
@@ -38,12 +41,15 @@ export interface PaperTradingResult {
   initialCash: number;
   finalValue: number;
   returnRate: number;
+  autoBlockMode: SafetyMode;
+  safetyBlockedSignals: number;
   trades: Trade[];
   decisions: PaperTradingDecisionLog[];
   equityCurve: Array<{ timestamp: number; value: number }>;
 }
 
 const defaultOptions: PaperTradingOptions = {
+  autoBlockMode: "disabled",
   guideRuleMode: "strict",
   maxCandles: 288,
   config: defaultBacktestConfig,
@@ -72,9 +78,11 @@ export function runPaperTradingSimulation(
   );
   let cash = resolved.config.initialCash;
   let position: Position | null = null;
+  const lastSellPriceByMarket = new Map<string, number>();
   const trades: Trade[] = [];
   const decisions: PaperTradingDecisionLog[] = [];
   const equityCurve: Array<{ timestamp: number; value: number }> = [];
+  let safetyBlockedSignals = 0;
 
   for (const timestamp of timestamps) {
     const signals: DailySignal[] = [];
@@ -94,6 +102,7 @@ export function runPaperTradingSimulation(
           market: selected.market,
           candles,
           candleIndex,
+          lastSellPrice: lastSellPriceByMarket.get(selected.market),
           position: marketPosition,
           portfolioValue: getPortfolioValue(cash, position, candlesAtTime),
         },
@@ -105,10 +114,19 @@ export function runPaperTradingSimulation(
         decision,
         mode: resolved.guideRuleMode,
       });
-      const finalAction =
+      let finalAction =
         decision.action === "buy" && resolved.guideRuleMode === "strict" && !guideRuleEvaluation.passed
           ? "hold"
           : decision.action;
+      if (finalAction === "buy" && resolved.autoBlockMode === "enabled") {
+        const candlesUntilDecision = candles.slice(0, candleIndex + 1);
+        const currentReturn = getDailyReturnAtCandleIndex(candles, candleIndex);
+        const safetyEvaluation = evaluateSafetyBlock(selected.bestResult, candlesUntilDecision, currentReturn);
+        if (safetyEvaluation.blocked) {
+          finalAction = "hold";
+          safetyBlockedSignals += 1;
+        }
+      }
 
       if (finalAction !== "hold") {
         signals.push({
@@ -133,13 +151,16 @@ export function runPaperTradingSimulation(
           }
         : null,
       now: timestamp,
+      options: strategy.id === "general-d" ? { rotationAdvantage: Number.POSITIVE_INFINITY } : undefined,
       signals,
     });
 
     if ((decision.action === "sell" || decision.action === "rotate") && position) {
       const candle = candlesAtTime.get(position.market)?.candle;
       if (candle) {
-        cash += closePosition(position, candle.close * (1 - resolved.config.slippageRate), timestamp, decision.reasonCodes);
+        const exitPrice = candle.close * (1 - resolved.config.slippageRate);
+        cash += closePosition(position, exitPrice, timestamp, decision.reasonCodes);
+        lastSellPriceByMarket.set(position.market, exitPrice);
         position = null;
       }
     }
@@ -194,7 +215,9 @@ export function runPaperTradingSimulation(
     const candles = candlesByMarket[position.market] ?? [];
     const last = candles[marketPointers.get(position.market) ?? candles.length - 1] ?? candles[candles.length - 1];
     if (last) {
-      cash += closePosition(position, last.close * (1 - resolved.config.slippageRate), last.timestamp, ["paper-final-close"]);
+      const exitPrice = last.close * (1 - resolved.config.slippageRate);
+      cash += closePosition(position, exitPrice, last.timestamp, ["paper-final-close"]);
+      lastSellPriceByMarket.set(position.market, exitPrice);
       position = null;
       equityCurve.push({ timestamp: last.timestamp, value: cash });
     }
@@ -211,6 +234,8 @@ export function runPaperTradingSimulation(
     initialCash: resolved.config.initialCash,
     finalValue,
     returnRate: (finalValue - resolved.config.initialCash) / resolved.config.initialCash,
+    autoBlockMode: resolved.autoBlockMode,
+    safetyBlockedSignals,
     trades,
     decisions,
     equityCurve,

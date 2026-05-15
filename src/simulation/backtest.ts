@@ -30,6 +30,7 @@ export function runBacktest(
   const trades: Trade[] = [];
   const signalAudit: SignalAudit[] = [];
   const equityCurve: Array<{ timestamp: number; value: number }> = [];
+  let lastSellPrice: number | undefined;
   let peakValue = config.initialCash;
   let maxDrawdown = 0;
   const roundTripReturns: number[] = [];
@@ -61,6 +62,7 @@ export function runBacktest(
         market: candle.market,
         candles,
         candleIndex,
+        lastSellPrice,
         position,
         portfolioValue,
       },
@@ -157,6 +159,7 @@ export function runBacktest(
     strategyId: strategy.id,
     scenarioId: scenario.id,
     scenarioName: scenario.name,
+    scenarioParams: scenario.params,
     market: candles[0]?.market ?? "UNKNOWN",
     finalValue,
     returnRate: (finalValue - config.initialCash) / config.initialCash,
@@ -196,6 +199,7 @@ export function runBacktest(
       guideRuleEvaluation,
     });
     cash += proceeds - fee;
+    lastSellPrice = price;
     position = null;
     return entryCost === 0 ? 0 : realized / entryCost;
   }

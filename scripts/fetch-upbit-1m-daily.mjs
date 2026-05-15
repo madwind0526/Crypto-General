@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
-const strategyIds = ["momentum", "range-grid", "arbitrage", "anomaly"];
+const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d"];
 const guideModes = ["strict", "ignored"];
 const selectedMarkets = new Set();
 

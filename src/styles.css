@@ -639,6 +639,33 @@ h4 {
   border-top: 0;
 }
 
+.sortable-header {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.sortable-header span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sortable-header.active,
+.sortable-header:hover {
+  color: var(--text);
+}
+
 .optimization-card > div,
 .symbol-card-head,
 .symbol-meta {

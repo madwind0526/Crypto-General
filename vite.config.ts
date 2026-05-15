@@ -13,11 +13,12 @@ const refreshStepSets = {
   { label: "Build dashboard candle cache", script: "build:dashboard-cache" },
   { label: "Build dashboard results", script: "build:dashboard-results" },
   ],
-  anomaly: [
+  daily: [
     { label: "Fetch selected-market 1m daily candles", script: "fetch:upbit:1m:daily" },
     { label: "Run 1m daily paper simulation", script: "paper:sim:1m:daily" },
   ],
 };
+refreshStepSets.anomaly = refreshStepSets.daily;
 
 const refreshState = {
   completedAt: "",
@@ -53,7 +54,8 @@ function strategyRefreshPlugin() {
         }
 
         const url = new URL(req.url ?? "", "http://127.0.0.1");
-        const scope = url.searchParams.get("scope") === "anomaly" ? "anomaly" : "general";
+        const requestedScope = url.searchParams.get("scope");
+        const scope = requestedScope === "daily" || requestedScope === "anomaly" ? "daily" : "general";
         runRefreshJob(scope);
         sendJson(res, refreshState);
       });

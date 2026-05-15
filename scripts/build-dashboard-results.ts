@@ -78,7 +78,7 @@ async function buildPlans(guideRuleMode: GuideRuleMode): Promise<TraderOptimizat
       strategyName: strategy.name,
       guideRuleMode,
       candidateMarketCount: 30,
-      monitoringMarketCount: 12,
+      monitoringMarketCount: selectedMarkets.length,
       candidateMarkets: selectedMarkets.map((item) => ({
         market: item.market,
         tradeValue: item.tradeValue,

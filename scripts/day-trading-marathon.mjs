@@ -5,7 +5,7 @@ import path from "node:path";
 
 const UPBIT_BASE_URL = "https://api.upbit.com";
 const root = process.cwd();
-const strategyIds = ["momentum", "range-grid", "arbitrage", "anomaly"];
+const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d"];
 const guideModes = ["strict", "ignored"];
 const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
 const publicCachePath = path.join(root, "public", "market", "upbit-krw-1m-daily.json");
@@ -43,8 +43,9 @@ const paperMaxCandles = Number(process.env.PAPER_MAX_CANDLES ?? process.env.MARA
 const once = process.argv.includes("--once") || process.env.MARATHON_ONCE === "true";
 const resetCache = process.env.MARATHON_RESET_CACHE === "true";
 const forcedStartAt = parseStartAt(process.env.MARATHON_START_AT_KST ?? process.env.MARATHON_START_AT);
+const dailyRollover = process.env.MARATHON_DAILY_ROLLOVER !== "false";
 
-const selectedMarkets = await loadSelectedMarkets();
+let selectedMarkets = await loadSelectedMarkets();
 if (selectedMarkets.length === 0) {
   throw new Error("No selected markets found. Run persist:traders first or set UPBIT_MARKETS.");
 }
@@ -55,7 +56,8 @@ console.log(
 console.log(`Retention: ${retentionTiers.map((tier) => tier.label).join(", ")}`);
 
 const startedAt = Date.now();
-const effectiveStartAt = forcedStartAt ?? startedAt;
+let effectiveStartAt = forcedStartAt ?? startedAt;
+let lastRolloverDayStart = getKstDayStart(effectiveStartAt);
 let cycle = 0;
 
 do {
@@ -63,6 +65,7 @@ do {
   const cycleStartedAt = Date.now();
 
   try {
+    await maybeRunDailyRollover();
     await runCycle(cycle);
   } catch (error) {
     console.error(error);
@@ -90,16 +93,19 @@ await writeStatus({
 
 async function runCycle(cycleNumber) {
   console.log(`[cycle ${cycleNumber}] fetching latest 1m candles`);
-  const previous = resetCache && cycleNumber === 1 ? null : await readCache();
+  const previous = await readCache();
   const nextCandlesByMarket = { ...(previous?.candlesByMarket ?? {}) };
 
   for (const market of selectedMarkets) {
     await sleep(requestDelayMs);
     const latest = await fetchLatestOneMinuteCandles(market);
     const merged = mergeCandles(nextCandlesByMarket[market] ?? [], latest);
-    nextCandlesByMarket[market] = applyRetention(merged, Date.now()).filter((candle) => candle.timestamp >= effectiveStartAt);
+    nextCandlesByMarket[market] = applyRetention(merged, Date.now());
     console.log(`[cycle ${cycleNumber}] ${market}: ${nextCandlesByMarket[market].length} candles`);
   }
+  const activeCandlesByMarket = Object.fromEntries(
+    selectedMarkets.map((market) => [market, nextCandlesByMarket[market] ?? []]),
+  );
 
   const payload = {
     source: "upbit-public-api",
@@ -107,7 +113,8 @@ async function runCycle(cycleNumber) {
     marketCount: selectedMarkets.length,
     candleUnitMinutes: 1,
     retentionPolicy: {
-      resetFrom: new Date(effectiveStartAt).toISOString(),
+      operationStartAt: new Date(effectiveStartAt).toISOString(),
+      resetFrom: resetCache ? new Date(effectiveStartAt).toISOString() : previous?.retentionPolicy?.resetFrom,
       tiers: retentionTiers.map((tier) => ({
         label: tier.label,
         bucketMinutes: tier.bucketMs / 60_000,
@@ -117,7 +124,7 @@ async function runCycle(cycleNumber) {
       retainDays: retainMs / dayMs,
     },
     selectedMarkets,
-    candlesByMarket: nextCandlesByMarket,
+    candlesByMarket: activeCandlesByMarket,
   };
 
   await writeJson(cachePath, payload, true);
@@ -144,6 +151,12 @@ function parseStartAt(value) {
     throw new Error(`Invalid MARATHON_START_AT value: ${value}`);
   }
   return timestamp;
+}
+
+function getKstDayStart(timestamp) {
+  const kstOffsetMs = 9 * 60 * 60 * 1000;
+  const shifted = new Date(timestamp + kstOffsetMs);
+  return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - kstOffsetMs;
 }
 
 async function loadSelectedMarkets() {
@@ -246,7 +259,29 @@ async function runPaperSimulation() {
   await runCommand(process.execPath, [path.join(root, "scripts", "paper-trading-1m-daily.mjs")], {
     MARKET_CACHE_PATH: path.relative(root, cachePath),
     PAPER_MAX_CANDLES: String(paperMaxCandles),
+    PAPER_START_AT: new Date(effectiveStartAt).toISOString(),
   });
+}
+
+async function maybeRunDailyRollover() {
+  if (!dailyRollover || once) return;
+
+  const currentDayStart = getKstDayStart(Date.now());
+  if (currentDayStart <= lastRolloverDayStart) return;
+
+  console.log("[rollover] KST day changed. Re-optimizing plans with previous 24h data.");
+  await runCommand(process.execPath, [path.join(root, "scripts", "daily-rollover.mjs")], {
+    ROLLOVER_AT: new Date(currentDayStart).toISOString(),
+  });
+
+  selectedMarkets = await loadSelectedMarkets();
+  if (selectedMarkets.length === 0) {
+    throw new Error("Daily rollover produced no selected markets.");
+  }
+
+  effectiveStartAt = currentDayStart;
+  lastRolloverDayStart = currentDayStart;
+  console.log(`[rollover] Restarted daily monitoring at ${new Date(effectiveStartAt).toISOString()}.`);
 }
 
 function runCommand(command, args, env = {}) {

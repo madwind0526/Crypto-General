@@ -3,7 +3,7 @@ import path from "node:path";
 import { runPaperTradingSimulation, type PaperTradingResult } from "../src/simulation/paperTrading";
 import type { TraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { strategies } from "../src/strategies";
-import type { Candle, GuideRuleMode, Strategy } from "../src/types/trading";
+import type { Candle, GuideRuleMode, SafetyMode, Strategy } from "../src/types/trading";
 
 interface MarketCachePayload {
   candleUnitMinutes?: number;
@@ -20,9 +20,11 @@ interface SummaryRow {
   strategyId: Strategy["id"];
   strategyName: string;
   guideRuleMode: GuideRuleMode;
+  autoBlockMode: SafetyMode;
   finalValue: number;
   returnRate: number;
   trades: number;
+  safetyBlockedSignals: number;
   decisions: number;
   startedAt: number;
   endedAt: number;
@@ -31,41 +33,64 @@ interface SummaryRow {
 const root = process.cwd();
 const marketCachePath = path.join(root, process.env.MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-daily.json");
 const outputRoot = path.join(root, process.env.PAPER_OUTPUT_DIR ?? "data/local/paper-trading-1m-daily");
-const publicOutputPath = path.join(root, "public", "market", "paper-trading-1m-daily-results.json");
+const publicOutputPath = path.join(
+  root,
+  process.env.PAPER_PUBLIC_OUTPUT_PATH ?? "public/market/paper-trading-1m-daily-results.json",
+);
 const maxCandles = Number(process.env.PAPER_MAX_CANDLES ?? 1440);
 const guideModes: GuideRuleMode[] = parseGuideModes(process.env.GUIDE_RULE_MODE);
+const safetyModes: SafetyMode[] = parseSafetyModes(process.env.SAFETY_MODE);
 const marketCache = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
+const startAt = parseKstStartAt(process.env.PAPER_START_AT_KST ?? process.env.PAPER_START_AT);
+if (startAt !== null) {
+  marketCache.candlesByMarket = Object.fromEntries(
+    Object.entries(marketCache.candlesByMarket).map(([market, candles]) => [
+      market,
+      candles.filter((candle) => candle.timestamp >= startAt),
+    ]),
+  );
+}
 const rows: SummaryRow[] = [];
 const results: Record<GuideRuleMode, Partial<Record<Strategy["id"], PaperTradingResult>>> = {
   ignored: {},
   strict: {},
 };
+const caseResults: Record<GuideRuleMode, Record<SafetyMode, Partial<Record<Strategy["id"], PaperTradingResult>>>> = {
+  ignored: { disabled: {}, enabled: {} },
+  strict: { disabled: {}, enabled: {} },
+};
 
 for (const strategy of strategies) {
   for (const guideRuleMode of guideModes) {
-    const planPath = path.join(root, "data", "local", "traders", strategy.id, "scenarios", `optimization-${guideRuleMode}.json`);
-    const planPayload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
-    const result = runPaperTradingSimulation(strategy, planPayload.plan, marketCache.candlesByMarket, {
-      guideRuleMode,
-      maxCandles,
-    });
-    results[guideRuleMode][strategy.id] = result;
-    const outputDir = path.join(outputRoot, strategy.id, guideRuleMode);
+    for (const autoBlockMode of safetyModes) {
+      const planPath = path.join(root, "data", "local", "traders", strategy.id, "scenarios", `optimization-${guideRuleMode}.json`);
+      const planPayload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      const result = runPaperTradingSimulation(strategy, planPayload.plan, marketCache.candlesByMarket, {
+        autoBlockMode,
+        guideRuleMode,
+        maxCandles,
+      });
+      caseResults[guideRuleMode][autoBlockMode][strategy.id] = result;
+      if (autoBlockMode === "disabled") results[guideRuleMode][strategy.id] = result;
+      const outputDir = path.join(outputRoot, strategy.id, guideRuleMode, autoBlockMode);
 
-    await mkdir(outputDir, { recursive: true });
-    await writeFile(path.join(outputDir, "latest-summary.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
-    await writeFile(
-      path.join(outputDir, "decisions.jsonl"),
-      result.decisions.map((decision) => JSON.stringify(decision)).join("\n") + "\n",
-      "utf8",
-    );
+      await mkdir(outputDir, { recursive: true });
+      await writeFile(path.join(outputDir, "latest-summary.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+      await writeFile(
+        path.join(outputDir, "decisions.jsonl"),
+        result.decisions.map((decision) => JSON.stringify(decision)).join("\n") + "\n",
+        "utf8",
+      );
 
-    rows.push(toSummaryRow(result));
-    console.log(
-      `${strategy.id}/${guideRuleMode}: final ${Math.round(result.finalValue).toLocaleString("ko-KR")} KRW, return ${(
-        result.returnRate * 100
-      ).toFixed(2)}%, trades ${result.trades.length}, decisions ${result.decisions.length}`,
-    );
+      rows.push(toSummaryRow(result));
+      console.log(
+        `${strategy.id}/${guideRuleMode}/${autoBlockMode}: final ${Math.round(result.finalValue).toLocaleString(
+          "ko-KR",
+        )} KRW, return ${(result.returnRate * 100).toFixed(2)}%, trades ${result.trades.length}, blocks ${
+          result.safetyBlockedSignals
+        }, decisions ${result.decisions.length}`,
+      );
+    }
   }
 }
 
@@ -76,8 +101,10 @@ const summary = {
     generatedAt: marketCache.generatedAt,
     candleUnitMinutes: marketCache.candleUnitMinutes,
     selectedMarkets: marketCache.selectedMarkets,
+    startAt: startAt ? new Date(startAt).toISOString() : undefined,
   },
   maxCandles,
+  caseResults,
   rows,
   results,
 };
@@ -94,14 +121,30 @@ function parseGuideModes(value: string | undefined): GuideRuleMode[] {
   return ["strict", "ignored"];
 }
 
+function parseSafetyModes(value: string | undefined): SafetyMode[] {
+  if (value === "enabled" || value === "disabled") return [value];
+  return ["enabled", "disabled"];
+}
+
+function parseKstStartAt(value: string | undefined): number | null {
+  if (!value) return null;
+  const normalized = value.includes("T") ? value : value.replace(" ", "T");
+  const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+09:00`;
+  const timestamp = Date.parse(withZone);
+  if (!Number.isFinite(timestamp)) throw new Error(`Invalid PAPER_START_AT value: ${value}`);
+  return timestamp;
+}
+
 function toSummaryRow(result: PaperTradingResult): SummaryRow {
   return {
     strategyId: result.strategyId,
     strategyName: result.strategyName,
     guideRuleMode: result.guideRuleMode,
+    autoBlockMode: result.autoBlockMode,
     finalValue: result.finalValue,
     returnRate: result.returnRate,
     trades: result.trades.length,
+    safetyBlockedSignals: result.safetyBlockedSignals,
     decisions: result.decisions.length,
     startedAt: result.startedAt,
     endedAt: result.endedAt,

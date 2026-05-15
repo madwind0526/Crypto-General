@@ -19,6 +19,7 @@
     "persist:traders": "node scripts/persist-trader-plans.mjs",
     "paper:sim": "node scripts/paper-trading-sim.mjs",
     "paper:sim:1m:daily": "node scripts/paper-trading-1m-daily.mjs",
+    "paper:daily-rollover": "node scripts/daily-rollover.mjs",
     "paper:marathon:day": "node scripts/day-trading-marathon.mjs",
     "test": "vitest run"
   },

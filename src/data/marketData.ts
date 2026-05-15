@@ -9,6 +9,7 @@ export interface DashboardMarketData {
   markets: string[];
   candlesByMarket: Record<string, Candle[]>;
   isRealUpbitData: boolean;
+  operationStartAt?: number;
 }
 
 export interface DashboardResults {
@@ -50,6 +51,7 @@ export interface DailyPaperResultsPayload {
     generatedAt?: string;
     candleUnitMinutes?: number;
     selectedMarkets?: string[];
+    startAt?: string;
   };
   maxCandles: number;
   results: Record<GuideRuleMode, Partial<Record<TraderId, DailyPaperResult>>>;
@@ -60,6 +62,10 @@ interface UpbitMarketCachePayload {
   generatedAt: string;
   candleUnitMinutes: number;
   dashboardWindowCandles?: number;
+  retentionPolicy?: {
+    operationStartAt?: string;
+    resetFrom?: string;
+  };
   selectedMarkets: string[];
   candlesByMarket: Record<string, Candle[]>;
 }
@@ -73,6 +79,7 @@ export async function loadDashboardMarketData(): Promise<DashboardMarketData> {
       markets: cached.selectedMarkets,
       candlesByMarket: cached.candlesByMarket,
       isRealUpbitData: true,
+      operationStartAt: parseTimestamp(cached.retentionPolicy?.operationStartAt ?? cached.retentionPolicy?.resetFrom),
     };
   }
 
@@ -89,6 +96,7 @@ export async function loadDailyOperationMarketData(): Promise<DashboardMarketDat
     markets: cached.selectedMarkets,
     candlesByMarket: cached.candlesByMarket,
     isRealUpbitData: true,
+    operationStartAt: parseTimestamp(cached.retentionPolicy?.operationStartAt ?? cached.retentionPolicy?.resetFrom),
   };
 }
 
@@ -137,4 +145,10 @@ async function fetchMarketCache(url: string): Promise<UpbitMarketCachePayload | 
   } catch {
     return null;
   }
+}
+
+function parseTimestamp(value: string | undefined) {
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }

@@ -1,6 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { buildDailyAnomalyMonitoringPlan } from "../src/simulation/anomalyMonitor";
 import { buildTraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { strategies } from "../src/strategies";
 import type { Candle, GuideRuleMode, Strategy } from "../src/types/trading";
@@ -21,7 +20,7 @@ const guideRuleModes: GuideRuleMode[] = (process.env.GUIDE_RULE_MODES ?? "strict
 const marketCachePath = path.join(root, process.env.MARKET_CACHE_PATH ?? "data/market/upbit-krw-5m.json");
 const outputRoot = path.join(root, "data", "local", "traders");
 const candidateMarketCount = Number(process.env.CANDIDATE_MARKET_COUNT ?? 30);
-const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 12);
+const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 30);
 const optimizationLookbackCandles = Number(process.env.OPTIMIZATION_MAX_CANDLES ?? 3000);
 
 const payload = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
@@ -31,13 +30,14 @@ for (const strategy of strategies) {
   await persistStrategy(strategy, payload, generatedAt);
 }
 
-await persistAnomalyPlan(payload, generatedAt);
 console.log(`Persisted trader plans under ${path.relative(root, outputRoot)}`);
 
 async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, generatedAt: string) {
   const traderDir = path.join(outputRoot, strategy.id);
+  const marketParamsDir = path.join(traderDir, "market-params");
   await mkdir(path.join(traderDir, "scenarios"), { recursive: true });
   await mkdir(path.join(traderDir, "simulations"), { recursive: true });
+  await mkdir(marketParamsDir, { recursive: true });
 
   for (const guideRuleMode of guideRuleModes) {
     const plan = buildTraderOptimizationPlan(strategy, payload.candlesByMarket, {
@@ -67,6 +67,7 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
       strategyName: strategy.name,
       selectedMarkets: compactPlan.selectedMarkets,
     });
+    await persistMarketParams(marketParamsDir, strategy, compactPlan, guideRuleMode, generatedAt);
 
     if (guideRuleMode === "strict") {
       await writeJson(path.join(traderDir, "selected-symbols.json"), {
@@ -84,24 +85,27 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
   }
 }
 
-async function persistAnomalyPlan(payload: MarketCachePayload, generatedAt: string) {
-  const anomalyDir = path.join(outputRoot, "anomaly", "simulations");
-  await mkdir(anomalyDir, { recursive: true });
-  const anomalyPlan = buildDailyAnomalyMonitoringPlan(payload.candlesByMarket, {
-    candidatePoolCount: candidateMarketCount,
-    monitoringMarketCount,
-  });
-
-  await writeJson(path.join(anomalyDir, "anomaly-monitoring-plan.json"), {
-    generatedAt,
-    marketCache: {
-      source: payload.source,
-      generatedAt: payload.generatedAt,
-      candleUnitMinutes: payload.candleUnitMinutes,
-      cachedMarketCount: payload.selectedMarkets.length,
-    },
-    anomalyPlan,
-  });
+async function persistMarketParams(
+  marketParamsDir: string,
+  strategy: Strategy,
+  plan: ReturnType<typeof compactOptimizationPlan>,
+  guideRuleMode: GuideRuleMode,
+  generatedAt: string,
+) {
+  for (const item of plan.selectedMarkets) {
+    await writeJson(path.join(marketParamsDir, `${item.market}.${guideRuleMode}.json`), {
+      generatedAt,
+      guideRuleMode,
+      market: item.market,
+      strategyId: strategy.id,
+      strategyName: strategy.name,
+      scenarioId: item.bestResult.scenarioId,
+      scenarioName: item.bestResult.scenarioName,
+      params: item.bestResult.scenarioParams,
+      lookbackCandles: optimizationLookbackCandles,
+      source: "daily-top-30-backtracking",
+    });
+  }
 }
 
 async function writeJson(filePath: string, value: unknown) {
@@ -127,6 +131,7 @@ function compactMarketOptimization(item: ReturnType<typeof buildTraderOptimizati
       strategyId: item.bestResult.strategyId,
       scenarioId: item.bestResult.scenarioId,
       scenarioName: item.bestResult.scenarioName,
+      scenarioParams: item.bestResult.scenarioParams,
       market: item.bestResult.market,
       finalValue: item.bestResult.finalValue,
       returnRate: item.bestResult.returnRate,

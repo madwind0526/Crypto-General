@@ -1,8 +1,10 @@
-export type TraderId = "momentum" | "range-grid" | "arbitrage" | "anomaly";
+export type TraderId = "momentum" | "range-grid" | "arbitrage" | "general-d" | "anomaly";
 
 export type DecisionAction = "hold" | "buy" | "sell";
 
 export type GuideRuleMode = "strict" | "ignored";
+
+export type SafetyMode = "enabled" | "disabled";
 
 export type GuideTrendState = "uptrend" | "downtrend" | "sideways" | "unknown";
 
@@ -53,6 +55,7 @@ export interface StrategyContext {
   market: string;
   candles: Candle[];
   candleIndex: number;
+  lastSellPrice?: number;
   position: Position | null;
   portfolioValue: number;
 }
@@ -121,6 +124,7 @@ export interface BacktestResult {
   strategyId: TraderId;
   scenarioId: string;
   scenarioName?: string;
+  scenarioParams?: Record<string, number>;
   market: string;
   finalValue: number;
   returnRate: number;

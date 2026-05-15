@@ -30,11 +30,9 @@ type AutoBlockMode = "enabled" | "disabled";
 type ScreenId =
   | "login"
   | "scenario-general"
-  | "scenario-anomaly"
   | "scenario-guideline"
   | "report-summary"
   | "report-general"
-  | "report-anomaly"
   | "daily-general-a"
   | "daily-general-b"
   | "daily-general-c"
@@ -43,15 +41,15 @@ type PopupTab = "graph" | "trades" | "returns" | "balance";
 type OperationPopupTab = Exclude<PopupTab, "graph">;
 type GuideFilterMode = GuideRuleMode | "all";
 type SafetyFilterMode = AutoBlockMode | "all";
+type SortDirection = "asc" | "desc";
+type OptimizationSortKey = "pick" | "market" | "candidate" | "scenario" | "return" | "maxDrawdown" | "rejected";
 const screenStorageKey = "crypto-trading.screenId";
 const screenIds: ScreenId[] = [
   "login",
   "scenario-general",
-  "scenario-anomaly",
   "scenario-guideline",
   "report-summary",
   "report-general",
-  "report-anomaly",
   "daily-general-a",
   "daily-general-b",
   "daily-general-c",
@@ -133,7 +131,7 @@ interface StrategyRefreshStatus {
   logs: string[];
   progress: number;
   running: boolean;
-  scope?: "general" | "anomaly" | "idle";
+  scope?: "general" | "daily" | "anomaly" | "idle";
   stepIndex: number;
   stepLabel: string;
   totalSteps: number;
@@ -166,6 +164,8 @@ const chartIntervalPresets: Array<{ interval: ChartInterval; label: string; valu
   { interval: { value: 30, unit: "minute" }, label: "30 minutes", value: "30m", windowLabel: "1 week" },
   { interval: { value: 1, unit: "hour" }, label: "1 hour", value: "1h", windowLabel: "1 month" },
 ];
+const dailyDisplayMarketCount = 12;
+const dailyMonitoringMarketCount = 30;
 
 const menuSections: MenuSection[] = [
   {
@@ -176,7 +176,6 @@ const menuSections: MenuSection[] = [
     title: "Scenario Builder",
     items: [
       { id: "scenario-general", label: "General Scenario", caption: "Overview / Build" },
-      { id: "scenario-anomaly", label: "Anomaly Scenario", caption: "Overview / Build" },
       { id: "scenario-guideline", label: "Base Guideline/Safety", caption: "Overview" },
     ],
   },
@@ -185,7 +184,6 @@ const menuSections: MenuSection[] = [
     items: [
       { id: "report-summary", label: "Summary" },
       { id: "report-general", label: "General Scenario Report" },
-      { id: "report-anomaly", label: "Anomaly Scenario Report" },
     ],
   },
   {
@@ -194,7 +192,7 @@ const menuSections: MenuSection[] = [
       { id: "daily-general-a", label: "General-A" },
       { id: "daily-general-b", label: "General-B" },
       { id: "daily-general-c", label: "General-C" },
-      { id: "daily-anomaly", label: "Anomaly" },
+      { id: "daily-anomaly", label: "General-D" },
     ],
   },
 ];
@@ -219,9 +217,9 @@ const dailyScreens: Record<
     description: "상대가치/통계 기반으로 12개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
   },
   "daily-anomaly": {
-    title: "Anomaly Daily Operation",
-    traderId: "anomaly",
-    description: "거래대금 급증, 단기 가격 돌파, 과열 여부를 함께 보며 이상 신호를 감시합니다.",
+    title: "General-D Daily Operation",
+    traderId: "general-d",
+    description: "General-B 기반 박스권 재진입 전략으로 12개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
   },
 };
 
@@ -358,7 +356,7 @@ export function App() {
         dashboardResults?.optimizationPlans ??
         buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
           candidateMarketCount: 30,
-          monitoringMarketCount: 12,
+          monitoringMarketCount: dailyMonitoringMarketCount,
           guideRuleMode: "strict",
           config: { ...defaultBacktestConfig, guideRuleMode: "strict" },
         }),
@@ -367,7 +365,7 @@ export function App() {
         dashboardResults?.optimizationPlans ??
         buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
           candidateMarketCount: 30,
-          monitoringMarketCount: 12,
+          monitoringMarketCount: dailyMonitoringMarketCount,
           guideRuleMode: "ignored",
           config: { ...defaultBacktestConfig, guideRuleMode: "ignored" },
         }),
@@ -443,7 +441,7 @@ export function App() {
     });
   }
 
-  async function handleStrategyRefresh(scope: "general" | "anomaly") {
+  async function handleStrategyRefresh(scope: "general" | "daily") {
     const response = await fetch(`/api/strategy-refresh?scope=${scope}`, { method: "POST" });
     const status = (await response.json()) as StrategyRefreshStatus;
     setRefreshStatus(status);
@@ -507,10 +505,10 @@ export function App() {
             <button
               className="utility-button"
               disabled={refreshStatus?.running}
-              onClick={() => handleStrategyRefresh("anomaly")}
+              onClick={() => handleStrategyRefresh("daily")}
               type="button"
             >
-              Anomaly Refresh
+              Daily Refresh
             </button>
           </div>
         </header>
@@ -527,19 +525,6 @@ export function App() {
             }
             onImport={handleImport}
             plans={activeOptimizationPlans}
-          />
-        ) : null}
-        {screenId === "scenario-anomaly" ? (
-          <AnomalyScenarioBuilder
-            importNotice={importNotice}
-            onExport={() =>
-              exportScenarioPayload(
-                "anomaly-scenario",
-                activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly"),
-              )
-            }
-            onImport={handleImport}
-            plan={activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly")}
           />
         ) : null}
         {screenId === "scenario-guideline" ? (
@@ -575,16 +560,6 @@ export function App() {
             plans={activeOptimizationPlans}
           />
         ) : null}
-        {screenId === "report-anomaly" ? (
-          <AnomalyReport
-            autoBlockMode={reportAutoBlockMode}
-            comparison={activeComparisons.find((comparison) => comparison.bestResult.strategyId === "anomaly")}
-            guideMode={reportGuideMode}
-            onAutoBlockModeChange={updateSharedAutoBlockMode}
-            onGuideModeChange={updateSharedGuideMode}
-            plan={activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly")}
-          />
-        ) : null}
         {isDailyScreen ? (
           <DailyOperationView
             autoBlockMode={activeDailyAutoBlockMode}
@@ -604,6 +579,7 @@ export function App() {
                 tab,
               )
             }
+            operationStartAt={operationMarketData.operationStartAt}
             plan={activeOptimizationPlans.find((plan) => plan.strategyId === activeDailyScreen.traderId)}
             paperResult={activeDailyPaperResults[activeDailyScreen.traderId]}
             screen={activeDailyScreen}
@@ -620,6 +596,7 @@ export function App() {
           market={popup.market}
           onClose={() => setPopup(null)}
           onIntervalChange={setModalInterval}
+          operationStartAt={operationMarketData.operationStartAt}
           themeMode={themeMode}
           tradeSummary={popup.tradeSummary}
           trades={popup.trades}
@@ -631,6 +608,7 @@ export function App() {
           dailyPaperResults={dailyPaperResults}
           onClose={() => setPopup(null)}
           onTabChange={(tab) => setPopup((current) => (current?.kind === "operation" ? { ...current, tab } : current))}
+          operationStartAt={operationMarketData.operationStartAt}
           popup={popup}
         />
       ) : null}
@@ -700,7 +678,7 @@ function GeneralScenarioBuilder({
             <h3>General 시나리오 개요 및 구축</h3>
             <p>A/B/C 일반 시나리오는 top 30 후보를 전략별로 최적화한 뒤 12개 감시 종목을 고르는 흐름입니다.</p>
           </div>
-          <strong>Top 30 -&gt; 12</strong>
+          <strong>Top 30 Monitoring</strong>
         </div>
         <div className="choice-tabs">
           {generalProfiles.map((profile) => (
@@ -755,17 +733,17 @@ function AnomalyScenarioBuilder({
       <section className="panel">
         <div className="section-head">
           <div>
-            <h3>특이점 시나리오 개요 및 구축</h3>
-            <p>특이점 전략은 특정 종목을 추격하기 위한 기능이 아니라, 공개 데이터에서 비정상 움직임을 빠르게 감시하는 실험입니다.</p>
+            <h3>General-D 시나리오 개요 및 구축</h3>
+            <p>General-D는 특정 종목을 추격하기보다 박스권, 눌림, 재진입 조건이 맞을 때만 거래하는 실험 전략입니다.</p>
           </div>
           <strong>{plan?.selectedMarkets.length ?? 0}/12</strong>
         </div>
         <div className="logic-grid">
-          <InfoTile title="이상점 정의" value="상대 거래대금 급증, 1~3분 가격 가속, 단기 고점 돌파, 과열 속도 초과 여부를 봅니다." />
-          <InfoTile title="매수 후보" value="신호 점수가 높고 아직 과열 속도를 넘지 않았으며, 스프레드/슬리피지 위험이 낮은 종목입니다." />
-          <InfoTile title="회피 조건" value="이미 과도하게 오른 뒤의 신호, 돌파 실패, 거래대금 하락, 급반전, 손익비 악화는 차단합니다." />
+          <InfoTile title="진입 조건" value="박스권 과매도 또는 상승 추세 중 눌림 구간에서만 매수 후보로 봅니다." />
+          <InfoTile title="매도 조건" value="매수가 대비 수익 목표를 넘긴 뒤, 박스권은 목표 매도하고 상승 추세는 트레일링으로 따라갑니다." />
+          <InfoTile title="재진입 조건" value="직전 매도가 대비 충분히 내려온 경우에만 같은 코인의 재매수를 허용합니다." />
         </div>
-        <ScenarioIOControls exportLabel="Anomaly export" importScope="Anomaly" onExport={onExport} onImport={onImport} />
+        <ScenarioIOControls exportLabel="General-D export" importScope="General-D" onExport={onExport} onImport={onImport} />
       </section>
       <NoticePanel title="Import 상태" value={importNotice} />
     </>
@@ -872,7 +850,7 @@ function GeneralReport({
   onGuideModeChange: (mode: GuideRuleMode) => void;
   plans: TraderOptimizationPlan[];
 }) {
-  const generalTraderIds: TraderId[] = ["momentum", "range-grid", "arbitrage"];
+  const generalTraderIds: TraderId[] = ["momentum", "range-grid", "arbitrage", "general-d"];
   const [selectedGeneralId, setSelectedGeneralId] = useState<TraderId>("momentum");
   const selectedComparison = comparisons.find((comparison) => comparison.bestResult.strategyId === selectedGeneralId);
   const selectedPlan = plans.find((plan) => plan.strategyId === selectedGeneralId);
@@ -926,7 +904,7 @@ function GeneralReport({
                 <h3>{profile?.name ?? traderId}</h3>
                 <p>{profile?.summary ?? "General strategy report."} All 12 selected monitoring candidates are shown below.</p>
               </div>
-              <strong>{comparison?.bestResult.market ?? "TBD"}</strong>
+              <strong>{formatMarketName(comparison?.bestResult.market ?? "TBD")}</strong>
             </div>
             {comparison ? <MetricStrip result={comparison.bestResult} /> : <div className="empty-state">No result yet.</div>}
             {plan ? <OptimizationPlanView plan={plan} /> : null}
@@ -956,8 +934,8 @@ function AnomalyReport({
     <section className="panel">
       <div className="section-head">
         <div>
-          <h3>특이점 시나리오 Report</h3>
-          <p>D 전략은 신호 빈도보다 거짓 신호, 슬리피지, 빠른 이탈 규칙을 더 엄격하게 봐야 합니다.</p>
+          <h3>General-D 시나리오 Report</h3>
+          <p>D 전략은 박스권 여부, 수익 목표 도달, 직전 매도가 대비 눌림 재진입 조건을 함께 봅니다.</p>
         </div>
         <div className="operation-toggles">
           <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
@@ -980,6 +958,7 @@ function DailyOperationView({
   onGuideModeChange,
   onOpenMarket,
   onOpenOperation,
+  operationStartAt,
   plan,
   paperResult,
   screen,
@@ -994,6 +973,7 @@ function DailyOperationView({
   onGuideModeChange: (mode: GuideRuleMode) => void;
   onOpenMarket: (market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary) => void;
   onOpenOperation: (tab: OperationPopupTab) => void;
+  operationStartAt?: number;
   plan: TraderOptimizationPlan | undefined;
   paperResult: DailyPaperResult | undefined;
   screen: { title: string; traderId: TraderId; description: string };
@@ -1001,13 +981,15 @@ function DailyOperationView({
 }) {
   const profile = traderProfiles.find((item) => item.id === screen.traderId);
   const entries = useMemo(
-    () => buildDailyEntries(plan, marketData.candlesByMarket, autoBlockMode, paperResult),
-    [autoBlockMode, marketData.candlesByMarket, paperResult, plan],
+    () => buildDailyEntries(plan, marketData.candlesByMarket, autoBlockMode, paperResult, operationStartAt),
+    [autoBlockMode, marketData.candlesByMarket, operationStartAt, paperResult, plan],
   );
+  const displayedEntries = useMemo(() => entries.slice(0, dailyDisplayMarketCount), [entries]);
   const signals = useMemo(() => buildDailySignals(entries), [entries]);
   const operationSummary = useMemo(
-    () => buildDailyOperationSummary(entries, paperResult, plan, marketData.candlesByMarket, autoBlockMode),
-    [autoBlockMode, entries, marketData.candlesByMarket, paperResult, plan],
+    () =>
+      buildDailyOperationSummary(entries, paperResult, plan, marketData.candlesByMarket, autoBlockMode, operationStartAt),
+    [autoBlockMode, entries, marketData.candlesByMarket, operationStartAt, paperResult, plan],
   );
   const decision = useMemo(
     () =>
@@ -1053,7 +1035,7 @@ function DailyOperationView({
           </div>
         </div>
         <div className="watch-grid" aria-label="Daily operation markets">
-          {entries.map(({ candles, currentReturn, label, market, tradeSummary, trades }) => {
+          {displayedEntries.map(({ candles, currentReturn, label, market, tradeSummary, trades }) => {
             const aggregated = aggregateCandles(candles, chartInterval);
 
             return (
@@ -1068,7 +1050,7 @@ function DailyOperationView({
                 tabIndex={0}
               >
                 <div className="symbol-card-head">
-                  <strong>{market}</strong>
+                  <strong>{formatMarketName(market)}</strong>
                   <span className={currentReturn >= 0 ? "gain" : "loss"} title="오늘 기준점 대비 현재가 수익률">
                     {formatPct(currentReturn)}
                   </span>
@@ -1077,7 +1059,14 @@ function DailyOperationView({
                   <span>{label}</span>
                   <strong className={tradeSummary.returnRate >= 0 ? "gain" : "loss"}>{formatTradeSummary(tradeSummary)}</strong>
                 </div>
-                <MarketChart candles={aggregated} interval={chartInterval} themeMode={themeMode} trades={trades} variant="mini" />
+                <MarketChart
+                  boundaryTimestamp={operationStartAt}
+                  candles={aggregated}
+                  interval={chartInterval}
+                  themeMode={themeMode}
+                  trades={trades}
+                  variant="mini"
+                />
               </article>
             );
           })}
@@ -1096,6 +1085,7 @@ function MarketInfoPopup({
   market,
   onClose,
   onIntervalChange,
+  operationStartAt,
   themeMode,
   tradeSummary,
   trades,
@@ -1106,6 +1096,7 @@ function MarketInfoPopup({
   market: string;
   onClose: () => void;
   onIntervalChange: (interval: ChartInterval) => void;
+  operationStartAt?: number;
   themeMode: ThemeMode;
   tradeSummary: TradeSummary;
   trades: Trade[];
@@ -1118,7 +1109,7 @@ function MarketInfoPopup({
         <div className="chart-modal-head">
           <div>
             <p className="eyebrow">Market Popup</p>
-            <h3>{market}</h3>
+            <h3>{formatMarketName(market)}</h3>
           </div>
           <div className="chart-modal-actions">
             <IntervalControls interval={interval} onChange={onIntervalChange} label="Large chart" />
@@ -1128,6 +1119,7 @@ function MarketInfoPopup({
           </div>
         </div>
         <MarketChart
+          boundaryTimestamp={operationStartAt}
           candles={aggregated}
           interval={interval}
           metrics={{
@@ -1150,12 +1142,14 @@ function OperationInfoPopup({
   dailyPaperResults,
   onClose,
   onTabChange,
+  operationStartAt,
   popup,
 }: {
   candlesByMarket: Record<string, Candle[]>;
   dailyPaperResults: DailyPaperResultsPayload | null;
   onClose: () => void;
   onTabChange: (tab: OperationPopupTab) => void;
+  operationStartAt?: number;
   popup: Extract<PopupState, { kind: "operation" }>;
 }) {
   const [guideFilter, setGuideFilter] = useState<GuideFilterMode>(popup.tab === "balance" ? "all" : popup.guideMode);
@@ -1167,8 +1161,8 @@ function OperationInfoPopup({
   }, [popup.tab]);
 
   const cases = useMemo(
-    () => buildOperationCases(dailyPaperResults, popup.traderId, popup.plan, candlesByMarket),
-    [candlesByMarket, dailyPaperResults, popup.plan, popup.traderId],
+    () => buildOperationCases(dailyPaperResults, popup.traderId, popup.plan, candlesByMarket, operationStartAt),
+    [candlesByMarket, dailyPaperResults, operationStartAt, popup.plan, popup.traderId],
   );
   const filteredCases = useMemo(
     () =>
@@ -1332,7 +1326,7 @@ function ComparisonTable({ ranked }: { ranked: StrategyComparison[] }) {
           <span>{index + 1}</span>
           <span>{comparison.strategyName}</span>
           <span>{comparison.bestResult.scenarioName ?? comparison.bestResult.scenarioId}</span>
-          <span>{comparison.bestResult.market}</span>
+          <span>{formatMarketName(comparison.bestResult.market)}</span>
           <span className={comparison.bestResult.returnRate >= 0 ? "gain" : "loss"}>
             {formatPct(comparison.bestResult.returnRate)}
           </span>
@@ -1352,7 +1346,7 @@ function OptimizationSummary({ optimizationPlans }: { optimizationPlans: TraderO
           <h3>Monitoring Selection Summary</h3>
           <p>각 전략은 후보 30개를 평가한 뒤 감시 대상 12개를 선택합니다.</p>
         </div>
-        <strong>Top 30 -&gt; 12</strong>
+        <strong>Monitor 30 -&gt; Display 12</strong>
       </div>
       <div className="optimization-grid">
         {optimizationPlans.map((plan) => (
@@ -1365,7 +1359,7 @@ function OptimizationSummary({ optimizationPlans }: { optimizationPlans: TraderO
               Candidates {plan.candidateMarkets.length}/{plan.candidateMarketCount} - Selected{" "}
               {plan.selectedMarkets.length}/{plan.monitoringMarketCount}
             </p>
-            <small>{plan.selectedMarkets.map((item) => item.market).join(", ") || "No selected markets"}</small>
+            <small>{plan.selectedMarkets.map((item) => formatMarketName(item.market)).join(", ") || "No selected markets"}</small>
           </article>
         ))}
       </div>
@@ -1463,23 +1457,38 @@ function GuideModeComparisonView({ guideModeComparisons }: { guideModeComparison
 }
 
 function OptimizationPlanView({ limit, plan }: { limit?: number; plan: TraderOptimizationPlan }) {
-  const selectedMarkets = limit ? plan.selectedMarkets.slice(0, limit) : plan.selectedMarkets;
+  const [sortState, setSortState] = useState<{ direction: SortDirection; key: OptimizationSortKey }>({
+    direction: "desc",
+    key: "return",
+  });
+  const selectedMarkets = useMemo(() => {
+    const indexed = plan.selectedMarkets.map((item, index) => ({ index, item }));
+    const sorted = indexed.sort((a, b) => compareOptimizationRows(a, b, sortState.key, sortState.direction));
+    return (limit ? sorted.slice(0, limit) : sorted).map((row) => row.item);
+  }, [limit, plan.selectedMarkets, sortState]);
+
+  function updateSort(key: OptimizationSortKey) {
+    setSortState((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
 
   return (
     <div className="optimization-table">
       <div className="optimization-row header">
-        <span>Pick</span>
-        <span>Market</span>
-        <span>Candidate</span>
-        <span>Scenario</span>
-        <span>Return</span>
-        <span>Max DD</span>
-        <span>Rejected</span>
+        <SortableHeader active={sortState.key === "pick"} direction={sortState.direction} label="Pick" onClick={() => updateSort("pick")} />
+        <SortableHeader active={sortState.key === "market"} direction={sortState.direction} label="Market" onClick={() => updateSort("market")} />
+        <SortableHeader active={sortState.key === "candidate"} direction={sortState.direction} label="Candidate" onClick={() => updateSort("candidate")} />
+        <SortableHeader active={sortState.key === "scenario"} direction={sortState.direction} label="Scenario" onClick={() => updateSort("scenario")} />
+        <SortableHeader active={sortState.key === "return"} direction={sortState.direction} label="Return" onClick={() => updateSort("return")} />
+        <SortableHeader active={sortState.key === "maxDrawdown"} direction={sortState.direction} label="Max DD" onClick={() => updateSort("maxDrawdown")} />
+        <SortableHeader active={sortState.key === "rejected"} direction={sortState.direction} label="Rejected" onClick={() => updateSort("rejected")} />
       </div>
       {selectedMarkets.map((item, index) => (
         <div className="optimization-row" key={item.market}>
           <span>{index + 1}</span>
-          <span>{item.market}</span>
+          <span>{formatMarketName(item.market)}</span>
           <span>#{item.candidateRank}</span>
           <span>{item.bestResult.scenarioName ?? item.bestResult.scenarioId}</span>
           <span className={item.bestResult.returnRate >= 0 ? "gain" : "loss"}>{formatPct(item.bestResult.returnRate)}</span>
@@ -1494,7 +1503,7 @@ function OptimizationPlanView({ limit, plan }: { limit?: number; plan: TraderOpt
 function MetricStrip({ result }: { result: BacktestResult }) {
   return (
     <div className="metric-grid">
-      <Metric label="Best market" value={result.market} />
+      <Metric label="Best market" value={formatMarketName(result.market)} />
       <Metric label="Scenario" value={result.scenarioName ?? result.scenarioId} />
       <Metric label="Final value" value={formatKrw(result.finalValue)} />
       <Metric label="Return" value={formatPct(result.returnRate)} />
@@ -1524,7 +1533,7 @@ function TradeTable({ trades }: { trades: DisplayTrade[] }) {
         rows.map((trade) => (
           <div className="trade-row" key={`${trade.timestamp}-${trade.side}-${trade.price}`}>
             <span>{formatTradeTime(trade.timestamp)}</span>
-            <span>{trade.market}</span>
+            <span>{formatMarketName(trade.market)}</span>
             <span>{trade.caseLabel ?? "-"}</span>
             <span className={trade.side === "buy" ? "gain" : "loss"}>{trade.side.toUpperCase()}</span>
             <span>{formatKrw(trade.price)}</span>
@@ -1641,7 +1650,7 @@ function ReturnTrendLegend({ series }: { series: TrendSeries[] }) {
           {marketItems.map(([market, color]) => (
             <span key={market}>
               <i style={{ background: color }} />
-              {market}
+              {formatMarketName(market)}
             </span>
           ))}
         </div>
@@ -1696,10 +1705,58 @@ function LogicReviewPanel() {
       <div className="logic-grid">
         <InfoTile title="General 업데이트" value="walk-forward 검증, 수수료/슬리피지 반영, 손절/트레일링 조합, 과최적화 패널티가 필요합니다." />
         <InfoTile title="특이점 정의" value="현재 로직은 상대 거래대금, 가격 가속, 단기 돌파, 과열 패널티를 이상 신호로 봅니다." />
-        <InfoTile title="매매 타이밍" value="A는 추세 지속, B는 평균회귀, C는 상대가치 회귀, D는 이상 신호와 빠른 이탈 중심입니다." />
+        <InfoTile title="매매 타이밍" value="A는 추세 지속, B는 평균회귀, C는 상대가치 회귀, D는 박스권 재진입과 수익 목표 매도 중심입니다." />
       </div>
     </section>
   );
+}
+
+function SortableHeader({
+  active,
+  direction,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  direction: SortDirection;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button className={active ? "sortable-header active" : "sortable-header"} onClick={onClick} type="button">
+      <span>{label}</span>
+      <span aria-hidden="true">{active ? (direction === "asc" ? "↑" : "↓") : ""}</span>
+    </button>
+  );
+}
+
+function compareOptimizationRows(
+  a: { index: number; item: TraderOptimizationPlan["selectedMarkets"][number] },
+  b: { index: number; item: TraderOptimizationPlan["selectedMarkets"][number] },
+  key: OptimizationSortKey,
+  direction: SortDirection,
+) {
+  const multiplier = direction === "asc" ? 1 : -1;
+  const compared = compareOptimizationValue(a, b, key);
+  return compared === 0 ? a.index - b.index : compared * multiplier;
+}
+
+function compareOptimizationValue(
+  a: { index: number; item: TraderOptimizationPlan["selectedMarkets"][number] },
+  b: { index: number; item: TraderOptimizationPlan["selectedMarkets"][number] },
+  key: OptimizationSortKey,
+) {
+  if (key === "pick") return a.index - b.index;
+  if (key === "market") return formatMarketName(a.item.market).localeCompare(formatMarketName(b.item.market), "ko-KR");
+  if (key === "candidate") return a.item.candidateRank - b.item.candidateRank;
+  if (key === "scenario") {
+    const aScenario = a.item.bestResult.scenarioName ?? a.item.bestResult.scenarioId;
+    const bScenario = b.item.bestResult.scenarioName ?? b.item.bestResult.scenarioId;
+    return aScenario.localeCompare(bScenario, "ko-KR");
+  }
+  if (key === "return") return a.item.bestResult.returnRate - b.item.bestResult.returnRate;
+  if (key === "maxDrawdown") return a.item.bestResult.maxDrawdown - b.item.bestResult.maxDrawdown;
+  return a.item.bestResult.guideRejectedSignals - b.item.bestResult.guideRejectedSignals;
 }
 
 function RiskAnswerPanel({
@@ -1724,7 +1781,7 @@ function RiskAnswerPanel({
         <InfoTile title="Crash / Gap" value="Stop orders may fill worse than expected. Use max loss, daily loss limits, and emergency stop behavior." />
         <InfoTile title="Duplicate Orders" value="Loop or retry bugs can repeat orders. Use audit logs and idempotent execution before live trading." />
         <InfoTile title="Data Delay" value="Bad or delayed candles can flip signals. Validate data freshness and reject outliers." />
-        <InfoTile title="Manipulation Risk" value="Anomaly signals can reverse quickly. Block overextended entries and use time stops." />
+        <InfoTile title="Trend Risk" value="A one-way trend can reduce re-entry chances or keep positions open. Block downtrend entries and keep emergency exits active." />
       </div>
     </section>
   );
@@ -1935,6 +1992,7 @@ function buildDailyEntries(
   candlesByMarket: Record<string, Candle[]>,
   autoBlockMode: AutoBlockMode,
   paperResult?: DailyPaperResult,
+  operationStartAt?: number,
 ): DailyEntry[] {
   return (
     plan?.selectedMarkets
@@ -1946,7 +2004,7 @@ function buildDailyEntries(
       }))
       .filter((item) => item.candles.length > 0)
       .map((item) => {
-        const dayStart = getKstDayStartForCandles(item.candles);
+        const dayStart = operationStartAt ?? getKstDayStartForCandles(item.candles);
         const dailyCandles = filterCandlesSince(item.candles, dayStart);
         const currentReturn = getCandleReturn(dailyCandles);
         const autoBlock = evaluateAutoBlock(item.result, item.candles, currentReturn);
@@ -1960,7 +2018,7 @@ function buildDailyEntries(
 
         return {
           ...item,
-          candles: dailyCandles,
+          candles: item.candles,
           autoBlock,
           blockedBuyCount,
           currentReturn,
@@ -2002,13 +2060,14 @@ function buildDailyOperationSummary(
   plan: TraderOptimizationPlan | undefined,
   candlesByMarket: Record<string, Candle[]>,
   autoBlockMode: AutoBlockMode,
+  operationStartAt?: number,
 ) {
   const bestEntry = entries[0];
   return {
     bestMarket: bestEntry?.market ?? "Standby",
     bestReturn: bestEntry?.paperReturn ?? 0,
     bestTradeSummary: bestEntry ? formatTradeSummary(bestEntry.tradeSummary) : "BUY 0 / SELL 0 / BLOCK 0 / 0.00%",
-    totalReturn: getDailyOperationTotalReturn(paperResult, plan, candlesByMarket, autoBlockMode),
+    totalReturn: getDailyOperationTotalReturn(paperResult, plan, candlesByMarket, autoBlockMode, operationStartAt),
   };
 }
 
@@ -2017,10 +2076,11 @@ function getDailyOperationTotalReturn(
   plan: TraderOptimizationPlan | undefined,
   candlesByMarket: Record<string, Candle[]>,
   autoBlockMode: AutoBlockMode,
+  operationStartAt?: number,
 ) {
   if (!paperResult) return 0;
 
-  const dayStart = getKstDayStartForOperation(paperResult, candlesByMarket);
+  const dayStart = operationStartAt ?? getKstDayStartForOperation(paperResult, candlesByMarket);
   const rawTrades = filterTradesSince(filterTradesByPlan(paperResult.trades, plan), dayStart);
   const trades = autoBlockMode === "enabled" ? filterTradesBySafety(rawTrades, plan, candlesByMarket) : rawTrades;
   const equityCurve = rebuildEquityCurve(paperResult, trades, candlesByMarket, dayStart);
@@ -2123,6 +2183,7 @@ function buildOperationCases(
   traderId: TraderId,
   plan: TraderOptimizationPlan | undefined,
   candlesByMarket: Record<string, Candle[]>,
+  operationStartAt?: number,
 ): OperationCaseResult[] {
   const modes: GuideRuleMode[] = ["strict", "ignored"];
   const colors = ["#65c5de", "#2edc9a", "#e2a15b", "#f0848b"];
@@ -2132,7 +2193,7 @@ function buildOperationCases(
     const result = dailyPaperResults?.results?.[guideMode]?.[traderId];
     if (!result) continue;
 
-    const dayStart = getKstDayStartForOperation(result, candlesByMarket);
+    const dayStart = operationStartAt ?? getKstDayStartForOperation(result, candlesByMarket);
     const rawTrades = filterTradesSince(filterTradesByPlan(result.trades, plan), dayStart);
     const disabledLabel = `${formatGuideModeLabel(guideMode)} / Safety X`;
     cases.push({
@@ -2185,7 +2246,7 @@ function buildOperationReturnSeries(
       series.push({
         color: colorByMarket.get(market) ?? getSeriesColor(series.length),
         dashArray: getOperationCaseDashArray(operationCase),
-        label: `${market} / ${operationCase.label}`,
+        label: `${formatMarketName(market)} / ${operationCase.label}`,
         guideMode: operationCase.guideMode,
         market,
         points,
@@ -2486,6 +2547,8 @@ function getScreenTitle(screenId: ScreenId) {
 function loadStoredScreenId(): ScreenId {
   if (typeof window === "undefined") return "report-summary";
   const stored = window.localStorage.getItem(screenStorageKey);
+  if (stored === "scenario-anomaly") return "scenario-general";
+  if (stored === "report-anomaly") return "report-general";
   return isScreenId(stored) ? stored : "report-summary";
 }
 
@@ -2509,10 +2572,15 @@ function isDailyScreenId(value: ScreenId): value is keyof typeof dailyScreens {
 }
 
 function formatDailyDecision(action: string, buyMarket?: string, sellMarket?: string) {
-  if (action === "buy") return `BUY ${buyMarket}`;
-  if (action === "sell") return `SELL ${sellMarket}`;
-  if (action === "rotate") return `ROTATE ${sellMarket} -> ${buyMarket}`;
+  if (action === "buy") return `BUY ${formatMarketName(buyMarket)}`;
+  if (action === "sell") return `SELL ${formatMarketName(sellMarket)}`;
+  if (action === "rotate") return `ROTATE ${formatMarketName(sellMarket)} -> ${formatMarketName(buyMarket)}`;
   return "HOLD";
+}
+
+function formatMarketName(market: string | undefined) {
+  if (!market) return "TBD";
+  return market.startsWith("KRW-") ? market.slice(4) : market;
 }
 
 function formatGeneratedAt(value: string) {
@@ -2552,7 +2620,7 @@ function shortStrategyName(id: TraderId) {
   if (id === "momentum") return "General-A";
   if (id === "range-grid") return "General-B";
   if (id === "arbitrage") return "General-C";
-  return "Anomaly";
+  return "General-D";
 }
 
 function clamp01(value: number) {
