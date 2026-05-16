@@ -115,6 +115,7 @@ export function MarketChart({
       },
       timeScale: {
         borderVisible: false,
+        visible: true,
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: formatChartTimeLabel,
@@ -570,21 +571,11 @@ function fromChartTime(time: Time) {
 }
 
 function formatChartTimeLabel(time: Time) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Asia/Seoul",
-  }).format(new Date(fromChartTime(time)));
+  return formatHourMinute(fromChartTime(time));
 }
 
 function formatTooltipTime(timestamp: number) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Asia/Seoul",
-  }).format(new Date(timestamp));
+  return formatMonthDayTime(timestamp);
 }
 
 function formatRangeLabel(candles: Candle[]) {
@@ -595,13 +586,31 @@ function formatRangeLabel(candles: Candle[]) {
 }
 
 function formatShortDate(timestamp: number) {
-  return new Intl.DateTimeFormat("ko-KR", {
+  return formatMonthDayTime(timestamp);
+}
+
+function formatHourMinute(timestamp: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Seoul",
+  }).formatToParts(new Date(timestamp));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("hour")}:${get("minute")}`;
+}
+
+function formatMonthDayTime(timestamp: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
     timeZone: "Asia/Seoul",
-  }).format(new Date(timestamp));
+  }).formatToParts(new Date(timestamp));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
 function formatNumber(value: number) {

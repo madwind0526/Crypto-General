@@ -435,9 +435,26 @@ h4 {
 }
 
 .daily-control-panel .info-tile {
+  align-content: center;
   gap: 6px;
   min-width: 0;
+  min-height: 86px;
   padding: 10px 12px;
+  text-align: center;
+}
+
+.daily-control-panel .info-tile > strong {
+  display: grid;
+  place-items: center;
+  min-height: 32px;
+  margin: 0;
+}
+
+.daily-control-panel .info-tile > p {
+  display: grid;
+  place-items: center;
+  min-height: 28px;
+  margin: 0;
 }
 
 .scenario-card small,
@@ -845,9 +862,10 @@ h4 {
 
 .market-chart-range {
   position: absolute;
-  left: 8px;
-  bottom: 4px;
+  top: 6px;
+  left: 50%;
   z-index: 1;
+  max-width: calc(100% - 160px);
   padding: 3px 6px;
   border: 1px solid var(--tooltip-border);
   border-radius: 6px;
@@ -856,6 +874,9 @@ h4 {
   font-size: 0.68rem;
   line-height: 1.2;
   pointer-events: none;
+  text-align: center;
+  transform: translateX(-50%);
+  white-space: nowrap;
   backdrop-filter: blur(2px);
 }
 
@@ -887,8 +908,9 @@ h4 {
 }
 
 .market-chart-wrap--large .market-chart-range {
-  bottom: 8px;
-  left: 10px;
+  top: 10px;
+  left: 50%;
+  max-width: calc(100% - 420px);
   font-size: 0.78rem;
 }
 
