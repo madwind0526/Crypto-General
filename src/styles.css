@@ -306,6 +306,7 @@ h4 {
 
 .utility-button,
 .file-button,
+.ws-restart-btn,
 .operation-panel-actions button,
 .segmented button,
 .popup-tabs button {
@@ -323,6 +324,8 @@ h4 {
 .utility-button:focus-visible,
 .file-button:hover,
 .file-button:focus-visible,
+.ws-restart-btn:hover,
+.ws-restart-btn:focus-visible,
 .operation-panel-actions button:hover,
 .operation-panel-actions button:focus-visible,
 .segmented button:hover,
@@ -333,7 +336,8 @@ h4 {
   outline: 0;
 }
 
-.utility-button:disabled {
+.utility-button:disabled,
+.ws-restart-btn:disabled {
   cursor: wait;
   opacity: 0.55;
 }
@@ -431,7 +435,7 @@ h4 {
 }
 
 .daily-control-panel .daily-summary {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .daily-control-panel .info-tile {

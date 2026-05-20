@@ -1,7 +1,7 @@
 import { createSampleMarketSet } from "./sampleData";
 import type { StrategyComparison, StrategyGuideModeComparison } from "../simulation/optimizer";
 import type { TraderOptimizationPlan } from "../simulation/traderOptimization";
-import type { Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
+import type { BlockedSignal, Candle, GuideRuleMode, SafetyMode, Trade, TraderId } from "../types/trading";
 
 export interface DashboardMarketData {
   source: string;
@@ -22,6 +22,7 @@ export interface DashboardResults {
 }
 
 export interface DailyPaperResult {
+  autoBlockMode?: SafetyMode;
   strategyId: TraderId;
   strategyName: string;
   guideRuleMode: GuideRuleMode;
@@ -30,6 +31,9 @@ export interface DailyPaperResult {
   initialCash: number;
   finalValue: number;
   returnRate: number;
+  blockedSignals?: BlockedSignal[];
+  safetyBlockedByMarket?: Record<string, number>;
+  safetyBlockedSignals?: number;
   trades: Trade[];
   decisions: Array<{
     timestamp: number;
@@ -54,6 +58,7 @@ export interface DailyPaperResultsPayload {
     startAt?: string;
   };
   maxCandles: number;
+  caseResults?: Record<GuideRuleMode, Record<SafetyMode, Partial<Record<TraderId, DailyPaperResult>>>>;
   results: Record<GuideRuleMode, Partial<Record<TraderId, DailyPaperResult>>>;
 }
 

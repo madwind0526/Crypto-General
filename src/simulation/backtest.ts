@@ -68,12 +68,15 @@ export function runBacktest(
       },
       scenario,
     );
-    const guideRuleEvaluation = evaluateGuideRules({
-      candles,
-      candleIndex,
-      decision,
-      mode: guideRuleMode,
-    });
+    const guideRuleEvaluation =
+      decision.action === "hold"
+        ? createPassedGuideRuleEvaluation(guideRuleMode)
+        : evaluateGuideRules({
+            candles,
+            candleIndex,
+            decision,
+            mode: guideRuleMode,
+          });
     const finalAction =
       decision.action === "buy" && guideRuleMode === "strict" && !guideRuleEvaluation.passed
         ? "hold"
@@ -175,7 +178,7 @@ export function runBacktest(
     equityCurve,
   };
 
-  function closePosition(
+function closePosition(
     price: number,
     reasonCodes: string[],
     timestamp: number,
@@ -203,4 +206,17 @@ export function runBacktest(
     position = null;
     return entryCost === 0 ? 0 : realized / entryCost;
   }
+}
+
+function createPassedGuideRuleEvaluation(mode: GuideRuleMode): GuideRuleEvaluation {
+  return {
+    mode,
+    passed: true,
+    score: 1,
+    reasons: [],
+    blockers: [],
+    warnings: [],
+    trend: "unknown",
+    movingAverage: "unknown",
+  };
 }

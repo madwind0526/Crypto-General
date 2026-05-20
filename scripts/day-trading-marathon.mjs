@@ -5,11 +5,12 @@ import path from "node:path";
 
 const UPBIT_BASE_URL = "https://api.upbit.com";
 const root = process.cwd();
-const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d"];
+const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d", "general-e"];
 const guideModes = ["strict", "ignored"];
 const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
 const publicCachePath = path.join(root, "public", "market", "upbit-krw-1m-daily.json");
 const statusPath = path.join(root, "data", "local", "paper-trading-1m-daily", "marathon-status.json");
+const pidPath = path.join(root, "data", "local", "paper-trading-1m-daily", "marathon.pid");
 const durationMs = Number(process.env.MARATHON_DURATION_HOURS ?? 24) * 60 * 60 * 1000;
 const intervalMs = Number(process.env.MARATHON_INTERVAL_MINUTES ?? 1) * 60 * 1000;
 const hourMs = 60 * 60 * 1000;
@@ -38,6 +39,8 @@ const retentionTiers = [
 const retainMs = Math.max(...retentionTiers.map((tier) => tier.toAgeMs));
 const requestDelayMs = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 120);
 const maxRetries = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
+const fetchTimeoutMs = Number(process.env.UPBIT_FETCH_TIMEOUT_MS ?? 15_000);
+const childTimeoutMs = Number(process.env.MARATHON_CHILD_TIMEOUT_MINUTES ?? 30) * 60 * 1000;
 const candleFetchCount = Number(process.env.MARATHON_FETCH_CANDLES ?? 20);
 const paperMaxCandles = Number(process.env.PAPER_MAX_CANDLES ?? process.env.MARATHON_PAPER_MAX_CANDLES ?? 2000);
 const once = process.argv.includes("--once") || process.env.MARATHON_ONCE === "true";
@@ -54,11 +57,44 @@ console.log(
   `Starting day-trading marathon: ${selectedMarkets.length} markets, ${once ? "single cycle" : `${durationMs / 3_600_000}h`}`,
 );
 console.log(`Retention: ${retentionTiers.map((tier) => tier.label).join(", ")}`);
+console.log(`Timeouts: Upbit fetch ${fetchTimeoutMs}ms, child command ${childTimeoutMs / 60_000}m`);
 
 const startedAt = Date.now();
 let effectiveStartAt = forcedStartAt ?? startedAt;
 let lastRolloverDayStart = getKstDayStart(effectiveStartAt);
 let cycle = 0;
+let shuttingDown = false;
+
+await writeJson(pidPath, { pid: process.pid, startedAt: new Date(startedAt).toISOString() }, true);
+await writeStatus({
+  cycle,
+  cachePath: path.relative(root, cachePath),
+  lastCycleAt: new Date().toISOString(),
+  marketCount: selectedMarkets.length,
+  running: !once,
+  startedAt: new Date(effectiveStartAt).toISOString(),
+});
+
+process.on("SIGINT", () => {
+  shutdown("SIGINT", 130).catch((error) => {
+    console.error(error);
+    process.exit(130);
+  });
+});
+process.on("SIGTERM", () => {
+  shutdown("SIGTERM", 143).catch((error) => {
+    console.error(error);
+    process.exit(143);
+  });
+});
+process.on("uncaughtException", (error) => {
+  console.error(error);
+  shutdown("uncaughtException", 1, error).catch(() => process.exit(1));
+});
+process.on("unhandledRejection", (reason) => {
+  console.error(reason);
+  shutdown("unhandledRejection", 1, reason).catch(() => process.exit(1));
+});
 
 do {
   cycle += 1;
@@ -90,6 +126,21 @@ await writeStatus({
   running: false,
   startedAt: new Date(effectiveStartAt).toISOString(),
 });
+
+async function shutdown(reason, exitCode, error) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await writeStatus({
+    cycle,
+    cachePath: path.relative(root, cachePath),
+    stoppedAt: new Date().toISOString(),
+    running: false,
+    reason,
+    error: error instanceof Error ? error.message : error ? String(error) : undefined,
+    startedAt: new Date(effectiveStartAt).toISOString(),
+  });
+  process.exit(exitCode);
+}
 
 async function runCycle(cycleNumber) {
   console.log(`[cycle ${cycleNumber}] fetching latest 1m candles`);
@@ -291,11 +342,26 @@ function runCommand(command, args, env = {}) {
       env: { ...process.env, ...env },
       stdio: "inherit",
     });
-    child.on("exit", (code) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      reject(new Error(`${command} ${args.join(" ")} timed out after ${childTimeoutMs / 60_000} minutes`));
+    }, childTimeoutMs);
+
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+
+    child.on("exit", (code) => finish(() => {
       if (code === 0) resolve();
       else reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
-    });
-    child.on("error", reject);
+    }));
+    child.on("error", (error) => finish(() => reject(error)));
   });
 }
 
@@ -304,15 +370,23 @@ async function fetchJson(pathname) {
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     let response;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
     try {
       response = await fetch(`${UPBIT_BASE_URL}${pathname}`, {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       });
     } catch (error) {
-      lastError = error;
+      lastError =
+        error?.name === "AbortError"
+          ? new Error(`Upbit request timed out after ${fetchTimeoutMs}ms: ${pathname}`)
+          : error;
       if (attempt === maxRetries) break;
       await sleep(getRetryDelayMs(null, attempt));
       continue;
+    } finally {
+      clearTimeout(timer);
     }
 
     if (response.ok) return response.json();

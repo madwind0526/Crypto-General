@@ -149,7 +149,7 @@ function getMomentumIndicators(candles: Candle[], scenario: StrategyScenario): M
     momentumIndicatorCache.set(candles, scenarioCache);
   }
 
-  const key = JSON.stringify(scenario.params);
+  const key = getMutableCandleCacheKey(candles, scenario);
   const cached = scenarioCache.get(key);
   if (cached) return cached;
 
@@ -164,4 +164,8 @@ function getMomentumIndicators(candles: Candle[], scenario: StrategyScenario): M
   };
   scenarioCache.set(key, indicators);
   return indicators;
+}
+
+function getMutableCandleCacheKey(candles: Candle[], scenario: StrategyScenario) {
+  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
 }

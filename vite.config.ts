@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 
 const refreshStepSets = {
   general: [
@@ -134,6 +135,129 @@ function sendJson(res, payload) {
   res.end(JSON.stringify(payload));
 }
 
+// ─── ws-live restart plugin ───────────────────────────────────────────────────
+const wsLivePidFile = `${process.cwd()}/data/local/paper-trading-1m-daily/ws-live.pid`;
+
+const wsLiveState = {
+  pid: null,
+  running: false,
+  startedAt: "",
+  error: "",
+};
+
+function readPersistedPid() {
+  try {
+    const n = parseInt(readFileSync(wsLivePidFile, "utf8").trim(), 10);
+    return isNaN(n) || n <= 0 ? null : n;
+  } catch { return null; }
+}
+
+function persistPid(pid) {
+  try { writeFileSync(wsLivePidFile, String(pid), "utf8"); } catch { /* non-fatal */ }
+}
+
+function clearPersistedPid() {
+  try { unlinkSync(wsLivePidFile); } catch { /* already gone */ }
+}
+
+function killWsLive() {
+  // Only kill PIDs this project started — never touch other projects' processes
+  const pid = wsLiveState.pid ?? readPersistedPid();
+  if (pid) {
+    try {
+      // /F force-kills, /T kills entire child tree (catches esbuild subprocess)
+      execSync(`taskkill /F /T /PID ${pid}`, { timeout: 3000 });
+    } catch { /* already dead or access denied */ }
+  }
+  clearPersistedPid();
+  wsLiveState.pid = null;
+  wsLiveState.running = false;
+}
+
+function startWsLive() {
+  const root = process.cwd();
+  const logName = `ws-live-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.log`;
+  const logDir = `${root}/data/local/paper-trading-1m-daily/logs`;
+  const logPath = `${logDir}/${logName}`;
+  mkdirSync(logDir, { recursive: true });
+
+  const child = spawn("node", ["scripts/ws-live.mjs"], {
+    cwd: root,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // Write stdout/stderr to log file without keeping parent alive
+  try {
+    const log = createWriteStream(logPath, { flags: "a" });
+    child.stdout?.pipe(log);
+    child.stderr?.pipe(log);
+  } catch { /* log write failure is non-fatal */ }
+
+  child.unref();
+  wsLiveState.pid     = child.pid;
+  wsLiveState.running = true;
+  wsLiveState.startedAt = new Date().toISOString();
+  wsLiveState.error   = "";
+  persistPid(child.pid);
+  return child.pid;
+}
+
+function wsLivePlugin() {
+  return {
+    name: "ws-live-api",
+    configureServer(server) {
+      server.middlewares.use("/api/ws-live/status", (_req, res) => {
+        // Recover PID from file if Vite restarted and lost in-memory state
+        if (!wsLiveState.pid) wsLiveState.pid = readPersistedPid();
+        // Sync running state with actual process existence
+        if (wsLiveState.pid) {
+          try {
+            process.kill(wsLiveState.pid, 0);
+            wsLiveState.running = true;
+          } catch {
+            wsLiveState.running = false;
+            wsLiveState.pid = null;
+            clearPersistedPid();
+          }
+        }
+        sendJson(res, wsLiveState);
+      });
+
+      server.middlewares.use("/api/ws-live/restart", (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          sendJson(res, { error: "Method not allowed" });
+          return;
+        }
+        try {
+          killWsLive();
+          // Small delay so OS releases the WebSocket connection before reconnect
+          setTimeout(() => {
+            try {
+              const pid = startWsLive();
+              sendJson(res, { ...wsLiveState, pid });
+            } catch (err) {
+              wsLiveState.error = err instanceof Error ? err.message : String(err);
+              wsLiveState.running = false;
+              res.statusCode = 500;
+              sendJson(res, wsLiveState);
+            }
+          }, 1500);
+        } catch (err) {
+          wsLiveState.error = err instanceof Error ? err.message : String(err);
+          res.statusCode = 500;
+          sendJson(res, wsLiveState);
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [strategyRefreshPlugin(), react()],
+  plugins: [strategyRefreshPlugin(), wsLivePlugin(), react()],
+  server: {
+    port: 5178,
+    strictPort: true,
+  },
 });

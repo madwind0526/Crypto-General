@@ -4,6 +4,28 @@
 
 No known build issues after the latest implementation pass.
 
+### 2026-05-20 - Marathon run silently stopped updating
+
+Symptoms:
+- `marathon-status.json` still showed `running: true`, but `lastCycleAt`, `upbit-krw-1m-daily.json`, and `paper-trading-1m-daily-results.json` had stopped updating.
+- Multiple `ws-live.mjs` processes were also present, which could overwrite the same WS result file.
+
+Cause:
+- The marathon loop had retry logic for failed Upbit responses, but no hard timeout for a stalled fetch or child paper-simulation command.
+- A process could be interrupted without writing a final non-running status.
+- Duplicate WS processes could make the UI appear inconsistent.
+
+Fix:
+- Added Upbit fetch timeout, child-process timeout, PID/status files, and shutdown/error cleanup to `scripts/day-trading-marathon.mjs`.
+- Added `scripts/marathon-watchdog.mjs` and `npm run paper:marathon:watchdog` to restart the child if it exits early or status updates go stale.
+- Stopped duplicate current-repo WS processes and restarted one WS live process after the fresh daily cache was written.
+
+Verification:
+- `npm run build` passed.
+- `npm run test` passed.
+- `node --check scripts/day-trading-marathon.mjs` and `node --check scripts/marathon-watchdog.mjs` passed.
+- The restarted watchdog run reached cycle 4 and WS live reported `connected` with `caseResults`.
+
 ### 2026-05-12 - `npm install` timed out in sandbox
 
 Symptoms:

@@ -1,4 +1,4 @@
-export type TraderId = "momentum" | "range-grid" | "arbitrage" | "general-d" | "anomaly";
+export type TraderId = "momentum" | "range-grid" | "arbitrage" | "general-d" | "general-e" | "anomaly";
 
 export type DecisionAction = "hold" | "buy" | "sell";
 
@@ -87,6 +87,17 @@ export interface Trade {
   reasonCodes: string[];
   guideRuleMode?: GuideRuleMode;
   guideRuleEvaluation?: GuideRuleEvaluation;
+}
+
+export type BlockedSignalReason = "guide-rule" | "safety";
+
+export interface BlockedSignal {
+  market: string;
+  timestamp: number;
+  reason: BlockedSignalReason;
+  reasonCodes: string[];
+  guideRuleMode?: GuideRuleMode;
+  safetyMode?: SafetyMode;
 }
 
 export interface Position {

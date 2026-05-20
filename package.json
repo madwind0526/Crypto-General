@@ -21,13 +21,16 @@
     "paper:sim:1m:daily": "node scripts/paper-trading-1m-daily.mjs",
     "paper:daily-rollover": "node scripts/daily-rollover.mjs",
     "paper:marathon:day": "node scripts/day-trading-marathon.mjs",
+    "paper:marathon:watchdog": "node scripts/marathon-watchdog.mjs",
+    "ws:live": "node scripts/ws-live.mjs",
     "test": "vitest run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "lightweight-charts": "^5.0.8",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.18",

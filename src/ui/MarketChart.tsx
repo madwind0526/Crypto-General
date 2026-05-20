@@ -15,11 +15,12 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import type { Candle, Trade } from "../types/trading";
+import type { BlockedSignal, Candle, Trade } from "../types/trading";
 import { normalizeChartInterval, type ChartInterval } from "../data/candleAggregation";
 
 interface MarketChartProps {
   boundaryTimestamp?: number;
+  blockedSignals?: BlockedSignal[];
   candles: Candle[];
   interval: ChartInterval;
   metrics?: {
@@ -40,6 +41,7 @@ interface MeasurementPoints {
 
 export function MarketChart({
   boundaryTimestamp,
+  blockedSignals = [],
   candles,
   interval,
   metrics,
@@ -266,9 +268,10 @@ export function MarketChart({
     const visibleTimes = new Set(visibleCandles.map((candle) => candle.timestamp));
     markerSeries.setMarkers([
       ...createTradeMarkers(trades, visibleCandles, themeMode, variant),
+      ...createBlockedSignalMarkers(blockedSignals, visibleCandles, themeMode, variant),
       ...(variant === "large" ? createMeasurementMarkers(measurementPoints, visibleTimes, themeMode) : []),
     ]);
-  }, [measurementPoints, themeMode, trades, variant, visibleCandles]);
+  }, [blockedSignals, measurementPoints, themeMode, trades, variant, visibleCandles]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     if (candles.length <= visibleCandles.length) return;
@@ -423,6 +426,36 @@ function createTradeMarkers(
       position: "aboveBar",
       shape: "arrowDown",
       color: sellColor,
+      size: markerSize,
+    });
+  }
+
+  return markers;
+}
+
+function createBlockedSignalMarkers(
+  blockedSignals: BlockedSignal[],
+  visibleCandles: Candle[],
+  themeMode: "light" | "dark",
+  variant: "mini" | "large",
+): SeriesMarker<Time>[] {
+  if (blockedSignals.length === 0 || visibleCandles.length === 0) return [];
+
+  const guideColor = themeMode === "dark" ? "#63d7ff" : "#007db0";
+  const safetyColor = themeMode === "dark" ? "#ff5a6a" : "#c51f35";
+  const markerSize = variant === "large" ? 2.1 : 1.6;
+  const markers: SeriesMarker<Time>[] = [];
+
+  for (const signal of blockedSignals.slice().sort((a, b) => a.timestamp - b.timestamp)) {
+    const markerCandle = findVisibleCandleForTrade(visibleCandles, signal.timestamp);
+    if (!markerCandle) continue;
+
+    markers.push({
+      time: toChartTime(markerCandle.timestamp),
+      position: "aboveBar",
+      shape: "square",
+      color: signal.reason === "guide-rule" ? guideColor : safetyColor,
+      text: "X",
       size: markerSize,
     });
   }

@@ -1,6 +1,7 @@
 import { evaluateGuideRules } from "../guideRules/evaluator";
 import type {
   BacktestConfig,
+  BlockedSignal,
   Candle,
   GuideRuleMode,
   Position,
@@ -43,9 +44,16 @@ export interface PaperTradingResult {
   returnRate: number;
   autoBlockMode: SafetyMode;
   safetyBlockedSignals: number;
+  safetyBlockedByMarket: Record<string, number>;
+  blockedSignals: BlockedSignal[];
   trades: Trade[];
   decisions: PaperTradingDecisionLog[];
   equityCurve: Array<{ timestamp: number; value: number }>;
+}
+
+export interface PaperTradingStepOptions {
+  executionPrices?: Map<string, number>;
+  signalMarkets?: Set<string>;
 }
 
 const defaultOptions: PaperTradingOptions = {
@@ -55,56 +63,77 @@ const defaultOptions: PaperTradingOptions = {
   config: defaultBacktestConfig,
 };
 
-export function runPaperTradingSimulation(
-  strategy: Strategy,
-  plan: TraderOptimizationPlan,
-  candlesByMarket: Record<string, Candle[]>,
-  options: Partial<PaperTradingOptions> = {},
-): PaperTradingResult {
-  const resolved = {
-    ...defaultOptions,
-    ...options,
-    config: {
-      ...defaultOptions.config,
-      ...options.config,
-      guideRuleMode: options.guideRuleMode ?? options.config?.guideRuleMode ?? defaultOptions.guideRuleMode,
-    },
-  };
-  const selectedMarkets = plan.selectedMarkets.filter((item) => (candlesByMarket[item.market] ?? []).length > 0);
-  const scenarioById = getScenarioById(strategy);
-  const marketPointers = new Map<string, number>();
-  const timestamps = getSimulationTimestamps(selectedMarkets.map((item) => candlesByMarket[item.market] ?? [])).slice(
-    -resolved.maxCandles,
-  );
-  let cash = resolved.config.initialCash;
-  let position: Position | null = null;
-  const lastSellPriceByMarket = new Map<string, number>();
-  const trades: Trade[] = [];
-  const decisions: PaperTradingDecisionLog[] = [];
-  const equityCurve: Array<{ timestamp: number; value: number }> = [];
-  let safetyBlockedSignals = 0;
+export class PaperTradingSession {
+  readonly initialCash: number;
+  readonly selectedMarkets: TraderOptimizationPlan["selectedMarkets"];
 
-  for (const timestamp of timestamps) {
+  private cash: number;
+  private readonly config: BacktestConfig;
+  private readonly guideRuleMode: GuideRuleMode;
+  private readonly autoBlockMode: SafetyMode;
+  private readonly scenarioById: Map<string, StrategyScenario>;
+  private readonly marketPointers = new Map<string, number>();
+  private position: Position | null = null;
+  private lastSellPriceByMarket = new Map<string, number>();
+  private lastPositionCandleTimestamp: number | null = null;
+  private trades: Trade[] = [];
+  private decisions: PaperTradingDecisionLog[] = [];
+  private equityCurve: Array<{ timestamp: number; value: number }> = [];
+  private safetyBlockedSignals = 0;
+  private safetyBlockedByMarket: Record<string, number> = {};
+  private blockedSignals: BlockedSignal[] = [];
+
+  constructor(
+    private readonly strategy: Strategy,
+    private readonly plan: TraderOptimizationPlan,
+    options: Partial<PaperTradingOptions> = {},
+  ) {
+    const resolved = resolveOptions(options);
+    this.config = resolved.config;
+    this.guideRuleMode = resolved.guideRuleMode;
+    this.autoBlockMode = resolved.autoBlockMode;
+    this.initialCash = resolved.config.initialCash;
+    this.cash = resolved.config.initialCash;
+    this.selectedMarkets = plan.selectedMarkets;
+    this.scenarioById = getScenarioById(strategy);
+  }
+
+  step(
+    timestamp: number,
+    candlesByMarket: Record<string, Candle[]>,
+    options: PaperTradingStepOptions = {},
+  ): DailyOperationDecision {
     const signals: DailySignal[] = [];
     const candlesAtTime = new Map<string, { candle: Candle; candleIndex: number }>();
 
-    for (const selected of selectedMarkets) {
+    for (const selected of this.selectedMarkets) {
       const candles = candlesByMarket[selected.market] ?? [];
-      const candleIndex = findCandleIndexAtOrBefore(candles, timestamp, marketPointers.get(selected.market) ?? 0);
+      const candleIndex = findCandleIndexAtOrBefore(candles, timestamp, this.marketPointers.get(selected.market) ?? 0);
       if (candleIndex < 0) continue;
-      marketPointers.set(selected.market, candleIndex);
+      this.marketPointers.set(selected.market, candleIndex);
       const candle = candles[candleIndex];
       candlesAtTime.set(selected.market, { candle, candleIndex });
-      const scenario = scenarioById.get(selected.bestResult.scenarioId) ?? strategy.defaultScenario;
-      const marketPosition = position?.market === selected.market ? position : null;
-      const decision = strategy.decide(
+    }
+
+    this.updateOpenPosition(candlesAtTime);
+
+    for (const selected of this.selectedMarkets) {
+      if (options.signalMarkets && !options.signalMarkets.has(selected.market)) continue;
+      const candleInfo = candlesAtTime.get(selected.market);
+      if (!candleInfo) continue;
+
+      const { candleIndex } = candleInfo;
+      const candles = candlesByMarket[selected.market] ?? [];
+      const scenario = this.scenarioById.get(selected.bestResult.scenarioId) ?? this.strategy.defaultScenario;
+      const marketPosition = this.position?.market === selected.market ? this.position : null;
+      const decision = this.strategy.decide(
         {
           market: selected.market,
           candles,
           candleIndex,
-          lastSellPrice: lastSellPriceByMarket.get(selected.market),
+          lastSellPrice: this.lastSellPriceByMarket.get(selected.market),
           position: marketPosition,
-          portfolioValue: getPortfolioValue(cash, position, candlesAtTime),
+          portfolioValue: this.getPortfolioValue(candlesAtTime),
         },
         scenario,
       );
@@ -112,19 +141,38 @@ export function runPaperTradingSimulation(
         candles,
         candleIndex,
         decision,
-        mode: resolved.guideRuleMode,
+        mode: this.guideRuleMode,
       });
       let finalAction =
-        decision.action === "buy" && resolved.guideRuleMode === "strict" && !guideRuleEvaluation.passed
+        decision.action === "buy" && this.guideRuleMode === "strict" && !guideRuleEvaluation.passed
           ? "hold"
           : decision.action;
-      if (finalAction === "buy" && resolved.autoBlockMode === "enabled") {
+      if (decision.action === "buy" && finalAction === "hold" && this.guideRuleMode === "strict" && !guideRuleEvaluation.passed) {
+        this.blockedSignals.push({
+          market: selected.market,
+          timestamp,
+          reason: "guide-rule",
+          reasonCodes: [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
+          guideRuleMode: this.guideRuleMode,
+          safetyMode: this.autoBlockMode,
+        });
+      }
+      if (finalAction === "buy" && this.autoBlockMode === "enabled") {
         const candlesUntilDecision = candles.slice(0, candleIndex + 1);
         const currentReturn = getDailyReturnAtCandleIndex(candles, candleIndex);
         const safetyEvaluation = evaluateSafetyBlock(selected.bestResult, candlesUntilDecision, currentReturn);
         if (safetyEvaluation.blocked) {
           finalAction = "hold";
-          safetyBlockedSignals += 1;
+          this.safetyBlockedSignals += 1;
+          this.safetyBlockedByMarket[selected.market] = (this.safetyBlockedByMarket[selected.market] ?? 0) + 1;
+          this.blockedSignals.push({
+            market: selected.market,
+            timestamp,
+            reason: "safety",
+            reasonCodes: [...decision.reasonCodes, ...guideRuleEvaluation.reasons, ...safetyEvaluation.reasons],
+            guideRuleMode: this.guideRuleMode,
+            safetyMode: this.autoBlockMode,
+          });
         }
       }
 
@@ -141,40 +189,45 @@ export function runPaperTradingSimulation(
     }
 
     const decision = decideDailyOperation({
-      currentPosition: position
+      currentPosition: this.position
         ? {
-            market: position.market,
-            entryPrice: position.averagePrice,
-            currentPrice: candlesAtTime.get(position.market)?.candle.close ?? position.averagePrice,
-            quantity: position.quantity,
-            openedAt: position.openedAt,
+            market: this.position.market,
+            entryPrice: this.position.averagePrice,
+            currentPrice: candlesAtTime.get(this.position.market)?.candle.close ?? this.position.averagePrice,
+            quantity: this.position.quantity,
+            openedAt: this.position.openedAt,
           }
         : null,
       now: timestamp,
-      options: strategy.id === "general-d" ? { rotationAdvantage: Number.POSITIVE_INFINITY } : undefined,
+      options: this.strategy.id === "general-d" || this.strategy.id === "general-e"
+        ? { rotationAdvantage: Number.POSITIVE_INFINITY }
+        : undefined,
       signals,
     });
 
-    if ((decision.action === "sell" || decision.action === "rotate") && position) {
-      const candle = candlesAtTime.get(position.market)?.candle;
+    if ((decision.action === "sell" || decision.action === "rotate") && this.position) {
+      const candle = candlesAtTime.get(this.position.market)?.candle;
       if (candle) {
-        const exitPrice = candle.close * (1 - resolved.config.slippageRate);
-        cash += closePosition(position, exitPrice, timestamp, decision.reasonCodes);
-        lastSellPriceByMarket.set(position.market, exitPrice);
-        position = null;
+        const basePrice = options.executionPrices?.get(this.position.market) ?? candle.close;
+        const exitPrice = basePrice * (1 - this.config.slippageRate);
+        this.cash += this.closePosition(this.position, exitPrice, timestamp, decision.reasonCodes);
+        this.lastSellPriceByMarket.set(this.position.market, exitPrice);
+        this.position = null;
+        this.lastPositionCandleTimestamp = null;
       }
     }
 
-    if ((decision.action === "buy" || decision.action === "rotate") && decision.buyMarket && !position) {
+    if ((decision.action === "buy" || decision.action === "rotate") && decision.buyMarket && !this.position) {
       const candle = candlesAtTime.get(decision.buyMarket)?.candle;
-      if (candle && cash > 0) {
-        const budget = cash;
-        const fillPrice = candle.close * (1 + resolved.config.slippageRate);
-        const fee = budget * resolved.config.feeRate;
+      if (candle && this.cash > 0) {
+        const budget = this.cash;
+        const basePrice = options.executionPrices?.get(decision.buyMarket) ?? candle.close;
+        const fillPrice = basePrice * (1 + this.config.slippageRate);
+        const fee = budget * this.config.feeRate;
         const quantity = Math.max(0, (budget - fee) / fillPrice);
         if (quantity > 0) {
-          cash -= budget;
-          position = {
+          this.cash -= budget;
+          this.position = {
             market: decision.buyMarket,
             quantity,
             averagePrice: fillPrice,
@@ -182,7 +235,8 @@ export function runPaperTradingSimulation(
             highestPrice: fillPrice,
             holdCandles: 0,
           };
-          trades.push({
+          this.lastPositionCandleTimestamp = candlesAtTime.get(decision.buyMarket)?.candle.timestamp ?? null;
+          this.trades.push({
             market: decision.buyMarket,
             side: "buy",
             timestamp,
@@ -190,61 +244,90 @@ export function runPaperTradingSimulation(
             quantity,
             fee,
             reasonCodes: decision.reasonCodes,
-            guideRuleMode: resolved.guideRuleMode,
+            guideRuleMode: this.guideRuleMode,
           });
         }
       }
     }
 
-    const portfolioValue = getPortfolioValue(cash, position, candlesAtTime);
-    decisions.push({
+    const portfolioValue = this.getPortfolioValue(candlesAtTime);
+    this.decisions.push({
       timestamp,
       action: decision.action,
       buyMarket: decision.buyMarket,
       sellMarket: decision.sellMarket,
       portfolioValue,
-      cash,
-      positionMarket: position?.market,
+      cash: this.cash,
+      positionMarket: this.position?.market,
       reasonCodes: decision.reasonCodes,
     });
-    equityCurve.push({ timestamp, value: portfolioValue });
+    this.equityCurve.push({ timestamp, value: portfolioValue });
+    return decision;
   }
 
-  const lastTimestamp = timestamps[timestamps.length - 1] ?? 0;
-  if (position) {
-    const candles = candlesByMarket[position.market] ?? [];
-    const last = candles[marketPointers.get(position.market) ?? candles.length - 1] ?? candles[candles.length - 1];
-    if (last) {
-      const exitPrice = last.close * (1 - resolved.config.slippageRate);
-      cash += closePosition(position, exitPrice, last.timestamp, ["paper-final-close"]);
-      lastSellPriceByMarket.set(position.market, exitPrice);
-      position = null;
-      equityCurve.push({ timestamp: last.timestamp, value: cash });
+  finalize(candlesByMarket: Record<string, Candle[]>, closeOpenPosition: boolean) {
+    if (closeOpenPosition && this.position) {
+      const candles = candlesByMarket[this.position.market] ?? [];
+      const last = candles[this.marketPointers.get(this.position.market) ?? candles.length - 1] ?? candles[candles.length - 1];
+      if (last) {
+        const exitPrice = last.close * (1 - this.config.slippageRate);
+        this.cash += this.closePosition(this.position, exitPrice, last.timestamp, ["paper-final-close"]);
+        this.lastSellPriceByMarket.set(this.position.market, exitPrice);
+        this.position = null;
+        this.lastPositionCandleTimestamp = null;
+        this.equityCurve.push({ timestamp: last.timestamp, value: this.cash });
+      }
+    }
+
+    return this.result();
+  }
+
+  result(): PaperTradingResult {
+    const finalValue = this.equityCurve[this.equityCurve.length - 1]?.value ?? this.getCurrentValue();
+    return {
+      strategyId: this.strategy.id,
+      strategyName: this.strategy.name,
+      guideRuleMode: this.guideRuleMode,
+      startedAt: this.equityCurve[0]?.timestamp ?? 0,
+      endedAt: this.equityCurve[this.equityCurve.length - 1]?.timestamp ?? 0,
+      initialCash: this.initialCash,
+      finalValue,
+      returnRate: (finalValue - this.initialCash) / this.initialCash,
+      autoBlockMode: this.autoBlockMode,
+      blockedSignals: this.blockedSignals.slice(),
+      safetyBlockedByMarket: { ...this.safetyBlockedByMarket },
+      safetyBlockedSignals: this.safetyBlockedSignals,
+      trades: this.trades.slice(),
+      decisions: this.decisions.slice(),
+      equityCurve: this.equityCurve.slice(),
+    };
+  }
+
+  private updateOpenPosition(candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>) {
+    if (!this.position) return;
+    const candle = candlesAtTime.get(this.position.market)?.candle;
+    if (!candle) return;
+    this.position.highestPrice = Math.max(this.position.highestPrice, candle.high);
+    if (this.lastPositionCandleTimestamp !== candle.timestamp) {
+      this.position.holdCandles += 1;
+      this.lastPositionCandleTimestamp = candle.timestamp;
     }
   }
 
-  const finalValue = equityCurve[equityCurve.length - 1]?.value ?? cash;
+  private getPortfolioValue(candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>) {
+    if (!this.position) return this.cash;
+    const currentPrice = candlesAtTime.get(this.position.market)?.candle.close ?? this.position.averagePrice;
+    return this.cash + this.position.quantity * currentPrice;
+  }
 
-  return {
-    strategyId: strategy.id,
-    strategyName: strategy.name,
-    guideRuleMode: resolved.guideRuleMode,
-    startedAt: timestamps[0] ?? 0,
-    endedAt: lastTimestamp,
-    initialCash: resolved.config.initialCash,
-    finalValue,
-    returnRate: (finalValue - resolved.config.initialCash) / resolved.config.initialCash,
-    autoBlockMode: resolved.autoBlockMode,
-    safetyBlockedSignals,
-    trades,
-    decisions,
-    equityCurve,
-  };
+  private getCurrentValue() {
+    return this.equityCurve[this.equityCurve.length - 1]?.value ?? this.cash;
+  }
 
-  function closePosition(positionToClose: Position, price: number, timestamp: number, reasonCodes: string[]) {
+  private closePosition(positionToClose: Position, price: number, timestamp: number, reasonCodes: string[]) {
     const proceeds = positionToClose.quantity * price;
-    const fee = proceeds * resolved.config.feeRate;
-    trades.push({
+    const fee = proceeds * this.config.feeRate;
+    this.trades.push({
       market: positionToClose.market,
       side: "sell",
       timestamp,
@@ -252,10 +335,42 @@ export function runPaperTradingSimulation(
       quantity: positionToClose.quantity,
       fee,
       reasonCodes,
-      guideRuleMode: resolved.guideRuleMode,
+      guideRuleMode: this.guideRuleMode,
     });
     return proceeds - fee;
   }
+}
+
+export function runPaperTradingSimulation(
+  strategy: Strategy,
+  plan: TraderOptimizationPlan,
+  candlesByMarket: Record<string, Candle[]>,
+  options: Partial<PaperTradingOptions> = {},
+): PaperTradingResult {
+  const resolved = resolveOptions(options);
+  const selectedMarkets = plan.selectedMarkets.filter((item) => (candlesByMarket[item.market] ?? []).length > 0);
+  const timestamps = getSimulationTimestamps(selectedMarkets.map((item) => candlesByMarket[item.market] ?? [])).slice(
+    -resolved.maxCandles,
+  );
+  const session = new PaperTradingSession(strategy, plan, resolved);
+
+  for (const timestamp of timestamps) {
+    session.step(timestamp, candlesByMarket);
+  }
+
+  return session.finalize(candlesByMarket, true);
+}
+
+function resolveOptions(options: Partial<PaperTradingOptions>) {
+  return {
+    ...defaultOptions,
+    ...options,
+    config: {
+      ...defaultOptions.config,
+      ...options.config,
+      guideRuleMode: options.guideRuleMode ?? options.config?.guideRuleMode ?? defaultOptions.guideRuleMode,
+    },
+  };
 }
 
 function getScenarioById(strategy: Strategy) {
@@ -299,16 +414,6 @@ function findLastIndexAtOrBefore(candles: Candle[], timestamp: number, low: numb
   }
 
   return result;
-}
-
-function getPortfolioValue(
-  cash: number,
-  position: Position | null,
-  candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>,
-) {
-  if (!position) return cash;
-  const currentPrice = candlesAtTime.get(position.market)?.candle.close ?? position.averagePrice;
-  return cash + position.quantity * currentPrice;
 }
 
 function scoreSelectedMarket(score: number, returnRate: number, maxDrawdown: number) {

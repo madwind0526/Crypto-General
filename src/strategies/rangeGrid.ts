@@ -67,7 +67,7 @@ export const rangeGridStrategy: Strategy = {
     const band = indicators.bands[candleIndex];
     const currentRsi = indicators.rsiValues[candleIndex];
 
-    if (band === null || currentRsi === null) return hold("warming-up");
+    if (band == null || currentRsi === null) return hold("warming-up");
 
     if (position) {
       if (current.close >= band.middle || position.holdCandles >= scenario.params.maxHoldCandles) {
@@ -113,7 +113,7 @@ function getRangeGridIndicators(candles: Candle[], scenario: StrategyScenario): 
     rangeGridIndicatorCache.set(candles, scenarioCache);
   }
 
-  const key = JSON.stringify(scenario.params);
+  const key = getMutableCandleCacheKey(candles, scenario);
   const cached = scenarioCache.get(key);
   if (cached) return cached;
 
@@ -124,4 +124,8 @@ function getRangeGridIndicators(candles: Candle[], scenario: StrategyScenario): 
   };
   scenarioCache.set(key, indicators);
   return indicators;
+}
+
+function getMutableCandleCacheKey(candles: Candle[], scenario: StrategyScenario) {
+  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
 }

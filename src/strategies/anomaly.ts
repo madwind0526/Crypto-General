@@ -129,7 +129,7 @@ function getAnomalyIndicators(candles: Candle[], scenario: StrategyScenario): An
     anomalyIndicatorCache.set(candles, scenarioCache);
   }
 
-  const key = JSON.stringify(scenario.params);
+  const key = getMutableCandleCacheKey(candles, scenario);
   const cached = scenarioCache.get(key);
   if (cached) return cached;
 
@@ -143,4 +143,8 @@ function getAnomalyIndicators(candles: Candle[], scenario: StrategyScenario): An
   };
   scenarioCache.set(key, indicators);
   return indicators;
+}
+
+function getMutableCandleCacheKey(candles: Candle[], scenario: StrategyScenario) {
+  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
 }

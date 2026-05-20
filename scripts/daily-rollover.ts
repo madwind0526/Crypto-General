@@ -13,13 +13,39 @@ interface MarketCachePayload {
   candlesByMarket: Record<string, Candle[]>;
 }
 
+interface UpbitMarket {
+  market: string;
+}
+
+interface UpbitTicker {
+  market: string;
+  acc_trade_price_24h: number;
+}
+
+interface UpbitMinuteCandle {
+  candle_acc_trade_price: number;
+  candle_acc_trade_volume: number;
+  high_price: number;
+  low_price: number;
+  market: string;
+  opening_price: number;
+  timestamp: number;
+  trade_price: number;
+}
+
+const UPBIT_BASE_URL = "https://api.upbit.com";
 const root = process.cwd();
 const outputRoot = path.join(root, process.env.ROLLOVER_OUTPUT_ROOT ?? "data/local/traders");
 const marketCachePath = path.join(root, process.env.ROLLOVER_MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-daily.json");
+const publicMarketCachePath = path.join(root, "public/market/upbit-krw-1m-daily.json");
 const candidateMarketCount = Number(process.env.ROLLOVER_CANDIDATE_MARKET_COUNT ?? 30);
 const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 30);
 const minCandles = Number(process.env.ROLLOVER_MIN_CANDLES ?? 240);
 const runDashboardBuild = process.env.ROLLOVER_BUILD_DASHBOARD !== "false";
+const refreshTopMarkets = process.env.ROLLOVER_REFRESH_TOP30 !== "false";
+const writeMarketCache = process.env.ROLLOVER_WRITE_MARKET_CACHE !== "false";
+const requestDelayMs = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 120);
+const maxRetries = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
 const guideRuleModes: GuideRuleMode[] = (process.env.ROLLOVER_GUIDE_RULE_MODES ?? "strict,ignored")
   .split(",")
   .map((mode) => mode.trim())
@@ -35,7 +61,7 @@ if (windowEnd <= windowStart) {
   throw new Error("Rollover window end must be after window start.");
 }
 
-const payload = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
+const payload = await loadRolloverMarketCache();
 const windowCandlesByMarket = sliceCandlesByWindow(payload.candlesByMarket, windowStart, windowEnd);
 const availableMarkets = Object.values(windowCandlesByMarket).filter((candles) => candles.length >= minCandles).length;
 
@@ -226,6 +252,153 @@ function sliceCandlesByWindow(candlesByMarket: Record<string, Candle[]>, start: 
   );
 }
 
+async function loadRolloverMarketCache(): Promise<MarketCachePayload> {
+  const cached = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
+  if (!refreshTopMarkets) return cached;
+
+  try {
+    const topMarkets = await fetchTopKrwMarkets(candidateMarketCount);
+    const candlesByMarket: Record<string, Candle[]> = {};
+
+    console.log(`Refreshing rollover top ${topMarkets.length}: ${topMarkets.join(", ")}`);
+    for (const market of topMarkets) {
+      await sleep(requestDelayMs);
+      const fetched = await fetchOneMinuteCandlesForWindow(market, windowStart, windowEnd);
+      candlesByMarket[market] = mergeCandles(cached.candlesByMarket[market] ?? [], fetched);
+      console.log(`Rollover cache ${market}: ${candlesByMarket[market].length} candles`);
+    }
+
+    const refreshed = {
+      ...cached,
+      generatedAt,
+      marketCount: topMarkets.length,
+      selectedMarkets: topMarkets,
+      source: "upbit-public-api",
+      candleUnitMinutes: 1,
+      candlesByMarket,
+    };
+
+    if (writeMarketCache) {
+      await writeJson(marketCachePath, refreshed);
+      await writeJson(publicMarketCachePath, refreshed);
+    }
+
+    return refreshed;
+  } catch (error) {
+    console.warn(
+      `Failed to refresh rollover top ${candidateMarketCount}; falling back to existing cache: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return cached;
+  }
+}
+
+async function fetchTopKrwMarkets(count: number) {
+  const markets = (await fetchJson("/v1/market/all?isDetails=false")) as UpbitMarket[];
+  const krwMarkets = markets.filter((item) => item.market.startsWith("KRW-")).map((item) => item.market);
+  const tickers = await fetchTickers(krwMarkets);
+  return tickers
+    .slice()
+    .sort((a, b) => b.acc_trade_price_24h - a.acc_trade_price_24h)
+    .slice(0, count)
+    .map((ticker) => ticker.market);
+}
+
+async function fetchTickers(markets: string[]) {
+  const tickers: UpbitTicker[] = [];
+  for (let index = 0; index < markets.length; index += 100) {
+    await sleep(requestDelayMs);
+    const params = new URLSearchParams({ markets: markets.slice(index, index + 100).join(",") });
+    tickers.push(...((await fetchJson(`/v1/ticker?${params.toString()}`)) as UpbitTicker[]));
+  }
+  return tickers;
+}
+
+async function fetchOneMinuteCandlesForWindow(market: string, start: number, end: number) {
+  const all: UpbitMinuteCandle[] = [];
+  let to = new Date(end).toISOString();
+
+  for (let page = 0; page < 12; page += 1) {
+    const params = new URLSearchParams({
+      count: "200",
+      market,
+      to,
+    });
+    const pageCandles = (await fetchJson(`/v1/candles/minutes/1?${params.toString()}`)) as UpbitMinuteCandle[];
+    if (pageCandles.length === 0) break;
+
+    all.push(...pageCandles);
+    const oldestTimestamp = Math.min(...pageCandles.map((candle) => candle.timestamp));
+    to = new Date(oldestTimestamp - 1).toISOString();
+    if (oldestTimestamp <= start) break;
+    await sleep(requestDelayMs);
+  }
+
+  const byTimestamp = new Map<number, Candle>();
+  for (const candle of all) {
+    if (candle.timestamp < start || candle.timestamp >= end) continue;
+    byTimestamp.set(candle.timestamp, {
+      close: candle.trade_price,
+      high: candle.high_price,
+      low: candle.low_price,
+      market: candle.market,
+      open: candle.opening_price,
+      quoteVolume: candle.candle_acc_trade_price,
+      timestamp: candle.timestamp,
+      volume: candle.candle_acc_trade_volume,
+    });
+  }
+
+  return [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function mergeCandles(existing: Candle[], incoming: Candle[]) {
+  const byTimestamp = new Map<number, Candle>();
+  for (const candle of existing) byTimestamp.set(candle.timestamp, candle);
+  for (const candle of incoming) byTimestamp.set(candle.timestamp, candle);
+  return [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function fetchJson(pathname: string) {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(`${UPBIT_BASE_URL}${pathname}`, {
+        headers: { Accept: "application/json" },
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxRetries) break;
+      await sleep(getRetryDelayMs(null, attempt));
+      continue;
+    }
+
+    if (response.ok) return response.json();
+
+    const text = await response.text();
+    lastError = new Error(`Upbit request failed ${response.status}: ${text}`);
+    if (!shouldRetry(response.status) || attempt === maxRetries) break;
+
+    await sleep(getRetryDelayMs(response, attempt));
+  }
+
+  throw lastError;
+}
+
+function shouldRetry(status: number) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function getRetryDelayMs(response: Response | null, attempt: number) {
+  const retryAfter = response?.headers?.get("retry-after");
+  const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : 0;
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return retryAfterMs;
+  return Math.min(8_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+}
+
 function getKstDayStart(timestamp: number) {
   const kstOffsetMs = 9 * 60 * 60 * 1000;
   const shifted = new Date(timestamp + kstOffsetMs);
@@ -271,4 +444,10 @@ function runCommand(command: string, args: string[]) {
 async function writeJson(filePath: string, value: unknown) {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

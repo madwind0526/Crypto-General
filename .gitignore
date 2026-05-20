@@ -6,6 +6,8 @@ dist/
 *.log
 .tmp/
 .tmp-*.log
+.claude/
+.claire/
 data/market/*.json
 data/local/**
 !data/local/

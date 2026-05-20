@@ -47,11 +47,31 @@ describe("paper trading simulation", () => {
 
     expect(result.trades.map((trade) => trade.side)).toEqual(["buy", "sell"]);
     expect(result.decisions.some((decision) => decision.action === "buy")).toBe(true);
+    expect(result.blockedSignals).toEqual([]);
     expect(result.finalValue).toBeGreaterThan(0);
+  });
+
+  it("records guideline and safety blocked buy signals", () => {
+    const guideBlocked = runPaperTradingSimulation(
+      strategy,
+      createPlan(),
+      { "KRW-TEST": createCandles("KRW-TEST", 20, -1) },
+      { guideRuleMode: "strict" },
+    );
+    expect(guideBlocked.blockedSignals.some((signal) => signal.reason === "guide-rule")).toBe(true);
+
+    const safetyBlocked = runPaperTradingSimulation(
+      strategy,
+      createPlan({ maxDrawdown: 0.2 }),
+      { "KRW-TEST": createCandles("KRW-TEST", 20) },
+      { autoBlockMode: "enabled", guideRuleMode: "ignored" },
+    );
+    expect(safetyBlocked.blockedSignals.some((signal) => signal.reason === "safety")).toBe(true);
+    expect(safetyBlocked.safetyBlockedSignals).toBeGreaterThan(0);
   });
 });
 
-function createPlan(): TraderOptimizationPlan {
+function createPlan(overrides: Partial<TraderOptimizationPlan["selectedMarkets"][number]["bestResult"]> = {}): TraderOptimizationPlan {
   return {
     strategyId: "momentum",
     strategyName: "Paper Test",
@@ -83,22 +103,23 @@ function createPlan(): TraderOptimizationPlan {
           trades: [],
           signalAudit: [],
           equityCurve: [],
+          ...overrides,
         },
       },
     ],
   };
 }
 
-function createCandles(market: string, count: number): Candle[] {
+function createCandles(market: string, count: number, direction = 1): Candle[] {
   return Array.from({ length: count }, (_, index) => {
-    const open = 100 + index;
-    const close = open + 1;
+    const open = 100 + index * direction;
+    const close = open + direction;
     return {
       market,
       timestamp: Date.UTC(2026, 4, 12) + index * 60_000,
       open,
-      high: close + 1,
-      low: open - 1,
+      high: Math.max(open, close) + 1,
+      low: Math.min(open, close) - 1,
       close,
       volume: 1000,
       quoteVolume: 1000 * close,

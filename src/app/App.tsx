@@ -11,6 +11,7 @@ import {
   type DailyPaperResult,
   type DailyPaperResultsPayload,
 } from "../data/marketData";
+import { loadWsLiveResults, type WsLiveResults } from "../data/wsLiveData";
 import { defaultBacktestConfig } from "../simulation/backtest";
 import { decideDailyOperation, scoreSignal, type DailySignal } from "../simulation/dailyOperation";
 import {
@@ -22,7 +23,7 @@ import {
 import { buildTraderOptimizationPlans, type TraderOptimizationPlan } from "../simulation/traderOptimization";
 import { strategies } from "../strategies";
 import { traderProfiles, type TraderProfile } from "../traders/profiles";
-import type { BacktestResult, Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
+import type { BacktestResult, BlockedSignal, Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
 import { MarketChart } from "../ui/MarketChart";
 
 type ThemeMode = "light" | "dark";
@@ -36,7 +37,8 @@ type ScreenId =
   | "daily-general-a"
   | "daily-general-b"
   | "daily-general-c"
-  | "daily-anomaly";
+  | "daily-anomaly"
+  | "daily-general-e";
 type PopupTab = "graph" | "trades" | "returns" | "balance";
 type OperationPopupTab = Exclude<PopupTab, "graph">;
 type GuideFilterMode = GuideRuleMode | "all";
@@ -54,10 +56,18 @@ const screenIds: ScreenId[] = [
   "daily-general-b",
   "daily-general-c",
   "daily-anomaly",
+  "daily-general-e",
 ];
 
 type PopupState =
-  | { currentReturn: number; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
+  | {
+      blockedSignals: BlockedSignal[];
+      currentReturn: number;
+      kind: "market";
+      market: string;
+      tradeSummary: TradeSummary;
+      trades: Trade[];
+    }
   | {
       autoBlockMode: AutoBlockMode;
       guideMode: GuideRuleMode;
@@ -89,6 +99,7 @@ interface DisplayTrade extends Trade {
 
 interface DailyEntry {
   autoBlock: AutoBlockEvaluation;
+  blockedSignals: BlockedSignal[];
   blockedBuyCount: number;
   candles: Candle[];
   currentReturn: number;
@@ -193,12 +204,13 @@ const menuSections: MenuSection[] = [
       { id: "daily-general-b", label: "General-B" },
       { id: "daily-general-c", label: "General-C" },
       { id: "daily-anomaly", label: "General-D" },
+      { id: "daily-general-e", label: "General-E" },
     ],
   },
 ];
 
 const dailyScreens: Record<
-  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-anomaly">,
+  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-anomaly" | "daily-general-e">,
   { title: string; traderId: TraderId; description: string }
 > = {
   "daily-general-a": {
@@ -220,6 +232,12 @@ const dailyScreens: Record<
     title: "General-D Daily Operation",
     traderId: "general-d",
     description: "General-B 기반 박스권 재진입 전략으로 12개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
+  },
+  "daily-general-e": {
+    title: "General-E Daily Operation",
+    traderId: "general-e",
+    description:
+      "최근 평균 거래가격 대비 급락하면 매수하고, 평균가격 기반 손절/익절 조건으로 반복 매매하는 전략입니다.",
   },
 };
 
@@ -249,6 +267,9 @@ export function App() {
   const [dashboardResults, setDashboardResults] = useState<DashboardResults | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<StrategyRefreshStatus | null>(null);
   const [importNotice, setImportNotice] = useState("아직 import된 전략 파일이 없습니다.");
+  const [wsLiveResults, setWsLiveResults] = useState<WsLiveResults | null>(null);
+  const [wsMode, setWsMode] = useState<"wsO" | "wsX">("wsO");
+  const [wsRestarting, setWsRestarting] = useState(false);
   const lastRefreshCompletedAtRef = useRef("");
   const lastDailyMarketGeneratedAtRef = useRef("");
   const lastDailyPaperGeneratedAtRef = useRef("");
@@ -336,6 +357,20 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    async function pollWsLive() {
+      const results = await loadWsLiveResults();
+      if (active && results) setWsLiveResults(results);
+    }
+    pollWsLive();
+    const timer = window.setInterval(pollWsLive, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const comparisonsByMode = useMemo(
     () => ({
       strict:
@@ -387,7 +422,11 @@ export function App() {
   const activeOptimizationPlans = optimizationPlansByMode[activeDailyGuideMode];
   const ranked = activeComparisons.slice().sort((a, b) => b.bestResult.returnRate - a.bestResult.returnRate);
   const operationMarketData = dailyMarketData ?? marketData;
-  const activeDailyPaperResults = dailyPaperResults?.results?.[activeDailyGuideMode] ?? {};
+  const activeDailyPaperResults = getDailyPaperCaseResults(
+    dailyPaperResults,
+    activeDailyGuideMode,
+    activeDailyAutoBlockMode,
+  );
   const selectedMarketCandles = popup?.kind === "market"
     ? operationMarketData.candlesByMarket[popup.market] ?? marketData.candlesByMarket[popup.market] ?? []
     : [];
@@ -418,8 +457,14 @@ export function App() {
     }));
   }
 
-  function openMarketPopup(market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary) {
-    setPopup({ currentReturn, kind: "market", market, tradeSummary, trades });
+  function openMarketPopup(
+    market: string,
+    trades: Trade[],
+    blockedSignals: BlockedSignal[],
+    currentReturn: number,
+    tradeSummary: TradeSummary,
+  ) {
+    setPopup({ blockedSignals, currentReturn, kind: "market", market, tradeSummary, trades });
     setModalInterval(chartInterval);
   }
 
@@ -445,6 +490,15 @@ export function App() {
     const response = await fetch(`/api/strategy-refresh?scope=${scope}`, { method: "POST" });
     const status = (await response.json()) as StrategyRefreshStatus;
     setRefreshStatus(status);
+  }
+
+  async function handleWsLiveRestart() {
+    setWsRestarting(true);
+    try {
+      await fetch("/api/ws-live/restart", { method: "POST" });
+    } finally {
+      setWsRestarting(false);
+    }
   }
 
   function handleImport(file: File | undefined, scope: string) {
@@ -579,11 +633,16 @@ export function App() {
                 tab,
               )
             }
+            onWsModeChange={setWsMode}
+            onWsLiveRestart={handleWsLiveRestart}
+            wsRestarting={wsRestarting}
             operationStartAt={operationMarketData.operationStartAt}
             plan={activeOptimizationPlans.find((plan) => plan.strategyId === activeDailyScreen.traderId)}
             paperResult={activeDailyPaperResults[activeDailyScreen.traderId]}
             screen={activeDailyScreen}
             themeMode={themeMode}
+            wsLiveResults={wsLiveResults}
+            wsMode={wsMode}
           />
         ) : null}
       </section>
@@ -599,6 +658,7 @@ export function App() {
           operationStartAt={operationMarketData.operationStartAt}
           themeMode={themeMode}
           tradeSummary={popup.tradeSummary}
+          blockedSignals={popup.blockedSignals}
           trades={popup.trades}
         />
       ) : null}
@@ -850,7 +910,7 @@ function GeneralReport({
   onGuideModeChange: (mode: GuideRuleMode) => void;
   plans: TraderOptimizationPlan[];
 }) {
-  const generalTraderIds: TraderId[] = ["momentum", "range-grid", "arbitrage", "general-d"];
+  const generalTraderIds: TraderId[] = ["momentum", "range-grid", "arbitrage", "general-d", "general-e"];
   const [selectedGeneralId, setSelectedGeneralId] = useState<TraderId>("momentum");
   const selectedComparison = comparisons.find((comparison) => comparison.bestResult.strategyId === selectedGeneralId);
   const selectedPlan = plans.find((plan) => plan.strategyId === selectedGeneralId);
@@ -958,11 +1018,16 @@ function DailyOperationView({
   onGuideModeChange,
   onOpenMarket,
   onOpenOperation,
+  onWsModeChange,
+  onWsLiveRestart,
+  wsRestarting,
   operationStartAt,
   plan,
   paperResult,
   screen,
   themeMode,
+  wsLiveResults,
+  wsMode,
 }: {
   autoBlockMode: AutoBlockMode;
   chartInterval: ChartInterval;
@@ -971,15 +1036,38 @@ function DailyOperationView({
   onAutoBlockModeChange: (mode: AutoBlockMode) => void;
   onChartIntervalChange: (interval: ChartInterval) => void;
   onGuideModeChange: (mode: GuideRuleMode) => void;
-  onOpenMarket: (market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary) => void;
+  onOpenMarket: (
+    market: string,
+    trades: Trade[],
+    blockedSignals: BlockedSignal[],
+    currentReturn: number,
+    tradeSummary: TradeSummary,
+  ) => void;
   onOpenOperation: (tab: OperationPopupTab) => void;
+  onWsModeChange: (mode: "wsO" | "wsX") => void;
+  onWsLiveRestart: () => void;
+  wsRestarting: boolean;
   operationStartAt?: number;
   plan: TraderOptimizationPlan | undefined;
   paperResult: DailyPaperResult | undefined;
   screen: { title: string; traderId: TraderId; description: string };
   themeMode: ThemeMode;
+  wsLiveResults: WsLiveResults | null;
+  wsMode: "wsO" | "wsX";
 }) {
   const profile = traderProfiles.find((item) => item.id === screen.traderId);
+  const wsLiveAligned = useMemo(
+    () => areMarketSetsEqual(wsLiveResults?.selectedMarkets, plan?.selectedMarkets.map((item) => item.market)),
+    [plan, wsLiveResults?.selectedMarkets],
+  );
+  const wsCaseResults = wsLiveResults?.caseResults?.[guideMode]?.[autoBlockMode];
+  const wsOReturn = wsLiveAligned
+    ? wsCaseResults?.wsO?.[screen.traderId]?.returnRate ?? wsLiveResults?.wsO[screen.traderId]?.returnRate ?? null
+    : null;
+  const wsXReturn = wsLiveAligned
+    ? wsCaseResults?.wsX?.[screen.traderId]?.returnRate ?? wsLiveResults?.wsX[screen.traderId]?.returnRate ?? null
+    : null;
+  const wsConnected = wsLiveResults?.status === "connected";
   const entries = useMemo(
     () => buildDailyEntries(plan, marketData.candlesByMarket, autoBlockMode, paperResult, operationStartAt),
     [autoBlockMode, marketData.candlesByMarket, operationStartAt, paperResult, plan],
@@ -1012,6 +1100,16 @@ function DailyOperationView({
           <div className="operation-toggles">
             <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
             <AutoBlockToggle mode={autoBlockMode} onChange={onAutoBlockModeChange} />
+            <WsModeToggle connected={wsConnected} mode={wsMode} onChange={onWsModeChange} />
+            <button
+              className="ws-restart-btn"
+              disabled={wsRestarting}
+              onClick={onWsLiveRestart}
+              title="ws-live 프로세스를 재시작합니다"
+              type="button"
+            >
+              {wsRestarting ? "재시작 중…" : "WS 재실행"}
+            </button>
           </div>
         </div>
         <div className="daily-summary">
@@ -1019,6 +1117,14 @@ function DailyOperationView({
           <InfoTile title="Best 거래 요약" value={operationSummary.bestTradeSummary} />
           <InfoTile title="Best 코인 수익률" value={formatPct(operationSummary.bestReturn)} />
           <InfoTile title="전체 수익률" value={formatPct(operationSummary.totalReturn)} />
+          <InfoTile
+            title="WS-O 수익률"
+            value={wsOReturn !== null ? formatPct(wsOReturn) : wsConnected && !wsLiveAligned ? "재시작 필요" : "미연결"}
+          />
+          <InfoTile
+            title="WS-X 수익률"
+            value={wsXReturn !== null ? formatPct(wsXReturn) : wsConnected && !wsLiveAligned ? "재시작 필요" : "미연결"}
+          />
         </div>
       </section>
 
@@ -1035,16 +1141,18 @@ function DailyOperationView({
           </div>
         </div>
         <div className="watch-grid" aria-label="Daily operation markets">
-          {displayedEntries.map(({ candles, currentReturn, label, market, tradeSummary, trades }) => {
+          {displayedEntries.map(({ blockedSignals, candles, currentReturn, label, market, tradeSummary, trades }) => {
             const aggregated = aggregateCandles(candles, chartInterval);
 
             return (
               <article
                 className="symbol-card"
                 key={market}
-                onClick={() => onOpenMarket(market, trades, currentReturn, tradeSummary)}
+                onClick={() => onOpenMarket(market, trades, blockedSignals, currentReturn, tradeSummary)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") onOpenMarket(market, trades, currentReturn, tradeSummary);
+                  if (event.key === "Enter" || event.key === " ") {
+                    onOpenMarket(market, trades, blockedSignals, currentReturn, tradeSummary);
+                  }
                 }}
                 role="button"
                 tabIndex={0}
@@ -1061,6 +1169,7 @@ function DailyOperationView({
                 </div>
                 <MarketChart
                   boundaryTimestamp={operationStartAt}
+                  blockedSignals={blockedSignals}
                   candles={aggregated}
                   interval={chartInterval}
                   themeMode={themeMode}
@@ -1079,6 +1188,7 @@ function DailyOperationView({
 }
 
 function MarketInfoPopup({
+  blockedSignals,
   candles,
   currentReturn,
   interval,
@@ -1090,6 +1200,7 @@ function MarketInfoPopup({
   tradeSummary,
   trades,
 }: {
+  blockedSignals: BlockedSignal[];
   candles: Candle[];
   currentReturn: number;
   interval: ChartInterval;
@@ -1120,6 +1231,7 @@ function MarketInfoPopup({
         </div>
         <MarketChart
           boundaryTimestamp={operationStartAt}
+          blockedSignals={blockedSignals}
           candles={aggregated}
           interval={interval}
           metrics={{
@@ -1306,6 +1418,27 @@ function AutoBlockToggle({ mode, onChange }: { mode: AutoBlockMode; onChange: (m
   );
 }
 
+function WsModeToggle({
+  connected,
+  mode,
+  onChange,
+}: {
+  connected: boolean;
+  mode: "wsO" | "wsX";
+  onChange: (mode: "wsO" | "wsX") => void;
+}) {
+  return (
+    <div className="segmented" aria-label="WebSocket mode" title={connected ? "WebSocket 연결됨" : "WebSocket 미연결"}>
+      <button className={mode === "wsO" ? "active" : ""} onClick={() => onChange("wsO")} type="button">
+        WS O
+      </button>
+      <button className={mode === "wsX" ? "active" : ""} onClick={() => onChange("wsX")} type="button">
+        WS X
+      </button>
+    </div>
+  );
+}
+
 function ComparisonTable({ ranked }: { ranked: StrategyComparison[] }) {
   return (
     <div className="table">
@@ -1464,7 +1597,7 @@ function OptimizationPlanView({ limit, plan }: { limit?: number; plan: TraderOpt
   const selectedMarkets = useMemo(() => {
     const indexed = plan.selectedMarkets.map((item, index) => ({ index, item }));
     const sorted = indexed.sort((a, b) => compareOptimizationRows(a, b, sortState.key, sortState.direction));
-    return (limit ? sorted.slice(0, limit) : sorted).map((row) => row.item);
+    return limit ? sorted.slice(0, limit) : sorted;
   }, [limit, plan.selectedMarkets, sortState]);
 
   function updateSort(key: OptimizationSortKey) {
@@ -1485,7 +1618,7 @@ function OptimizationPlanView({ limit, plan }: { limit?: number; plan: TraderOpt
         <SortableHeader active={sortState.key === "maxDrawdown"} direction={sortState.direction} label="Max DD" onClick={() => updateSort("maxDrawdown")} />
         <SortableHeader active={sortState.key === "rejected"} direction={sortState.direction} label="Rejected" onClick={() => updateSort("rejected")} />
       </div>
-      {selectedMarkets.map((item, index) => (
+      {selectedMarkets.map(({ index, item }) => (
         <div className="optimization-row" key={item.market}>
           <span>{index + 1}</span>
           <span>{formatMarketName(item.market)}</span>
@@ -2011,15 +2144,28 @@ function buildDailyEntries(
         const signal = applyAutoBlock(buildSignalFromResult(item.result), autoBlockMode, autoBlock);
         const rawTrades = (paperResult?.trades ?? item.result.trades ?? []).filter((trade) => trade.market === item.market);
         const dailyRawTrades = filterTradesSince(rawTrades, dayStart);
-        const trades = filterMarketTradesBySafety(dailyRawTrades, item.result, item.candles, autoBlockMode);
+        const blockedSignals = filterBlockedSignalsSince(
+          paperResult?.blockedSignals?.filter((signal) => signal.market === item.market) ?? [],
+          dayStart,
+        );
+        const paperCaseMatchesMode =
+          paperResult?.autoBlockMode === autoBlockMode || (!paperResult?.autoBlockMode && autoBlockMode === "disabled");
+        const trades = paperCaseMatchesMode
+          ? dailyRawTrades.slice().sort((a, b) => a.timestamp - b.timestamp)
+          : filterMarketTradesBySafety(dailyRawTrades, item.result, item.candles, autoBlockMode);
         const paperReturn = getMarketPaperReturn(trades, dailyCandles);
-        const blockedBuyCount = autoBlockMode === "enabled" ? countBlockedBuysBySafety(dailyRawTrades, item.result, item.candles) : 0;
+        const blockedBuyCount =
+          autoBlockMode === "enabled"
+            ? (paperResult?.safetyBlockedByMarket?.[item.market] ??
+              countBlockedBuysBySafety(dailyRawTrades, item.result, item.candles))
+            : 0;
         const tradeSummary = buildTradeSummary(trades, blockedBuyCount, paperReturn);
 
         return {
           ...item,
           candles: item.candles,
           autoBlock,
+          blockedSignals,
           blockedBuyCount,
           currentReturn,
           paperReturn,
@@ -2098,9 +2244,7 @@ function getDailyOperationTotalReturn(
   if (!paperResult) return 0;
 
   const dayStart = operationStartAt ?? getKstDayStartForOperation(paperResult, candlesByMarket);
-  const rawTrades = filterTradesSince(filterTradesByPlan(paperResult.trades, plan), dayStart);
-  const trades = autoBlockMode === "enabled" ? filterTradesBySafety(rawTrades, plan, candlesByMarket) : rawTrades;
-  const equityCurve = rebuildEquityCurve(paperResult, trades, candlesByMarket, dayStart);
+  const equityCurve = getPaperEquitySince(paperResult, dayStart);
   const last = equityCurve[equityCurve.length - 1];
   return last && paperResult.initialCash > 0 ? (last.value - paperResult.initialCash) / paperResult.initialCash : 0;
 }
@@ -2189,6 +2333,10 @@ function filterTradesSince<T extends Trade>(trades: T[], since: number) {
   return trades.filter((trade) => trade.timestamp >= since);
 }
 
+function filterBlockedSignalsSince<T extends BlockedSignal>(signals: T[], since: number) {
+  return signals.filter((signal) => signal.timestamp >= since);
+}
+
 function getDailyReturnAtTimestamp(candles: Candle[], timestamp: number) {
   const candleIndex = findCandleIndexAtOrBefore(candles, timestamp);
   const candlesUntilTimestamp = candleIndex >= 0 ? candles.slice(0, candleIndex + 1) : candles;
@@ -2203,39 +2351,54 @@ function buildOperationCases(
   operationStartAt?: number,
 ): OperationCaseResult[] {
   const modes: GuideRuleMode[] = ["strict", "ignored"];
+  const safetyModes: AutoBlockMode[] = ["disabled", "enabled"];
   const colors = ["#65c5de", "#2edc9a", "#e2a15b", "#f0848b"];
   const cases: OperationCaseResult[] = [];
 
   for (const guideMode of modes) {
-    const result = dailyPaperResults?.results?.[guideMode]?.[traderId];
-    if (!result) continue;
+    for (const autoBlockMode of safetyModes) {
+      const result = getDailyPaperCaseResult(dailyPaperResults, guideMode, autoBlockMode, traderId);
+      if (!result) continue;
 
-    const dayStart = operationStartAt ?? getKstDayStartForOperation(result, candlesByMarket);
-    const rawTrades = filterTradesSince(filterTradesByPlan(result.trades, plan), dayStart);
-    const disabledLabel = `${formatGuideModeLabel(guideMode)} / Safety X`;
-    cases.push({
-      autoBlockMode: "disabled",
-      color: colors[cases.length % colors.length],
-      equityCurve: rebuildEquityCurve(result, rawTrades, candlesByMarket, dayStart),
-      guideMode,
-      initialCash: result.initialCash,
-      label: disabledLabel,
-      trades: rawTrades,
-    });
-
-    const safeTrades = filterTradesBySafety(rawTrades, plan, candlesByMarket);
-    cases.push({
-      autoBlockMode: "enabled",
-      color: colors[cases.length % colors.length],
-      equityCurve: rebuildEquityCurve(result, safeTrades, candlesByMarket, dayStart),
-      guideMode,
-      initialCash: result.initialCash,
-      label: `${formatGuideModeLabel(guideMode)} / Safety O`,
-      trades: safeTrades,
-    });
+      const dayStart = operationStartAt ?? getKstDayStartForOperation(result, candlesByMarket);
+      const trades = filterTradesSince(filterTradesByPlan(result.trades, plan), dayStart);
+      cases.push({
+        autoBlockMode,
+        color: colors[cases.length % colors.length],
+        equityCurve: getPaperEquitySince(result, dayStart),
+        guideMode,
+        initialCash: result.initialCash,
+        label: `${formatGuideModeLabel(guideMode)} / ${formatAutoBlockModeLabel(autoBlockMode)}`,
+        trades,
+      });
+    }
   }
 
   return cases;
+}
+
+function getDailyPaperCaseResult(
+  dailyPaperResults: DailyPaperResultsPayload | null,
+  guideMode: GuideRuleMode,
+  autoBlockMode: AutoBlockMode,
+  traderId: TraderId,
+) {
+  return (
+    dailyPaperResults?.caseResults?.[guideMode]?.[autoBlockMode]?.[traderId] ??
+    (autoBlockMode === "disabled" ? dailyPaperResults?.results?.[guideMode]?.[traderId] : undefined)
+  );
+}
+
+function getDailyPaperCaseResults(
+  dailyPaperResults: DailyPaperResultsPayload | null,
+  guideMode: GuideRuleMode,
+  autoBlockMode: AutoBlockMode,
+) {
+  return (
+    dailyPaperResults?.caseResults?.[guideMode]?.[autoBlockMode] ??
+    (autoBlockMode === "disabled" ? dailyPaperResults?.results?.[guideMode] : undefined) ??
+    {}
+  );
 }
 
 function buildOperationReturnSeries(
@@ -2291,43 +2454,6 @@ function filterTradesByPlan(trades: Trade[], plan: TraderOptimizationPlan | unde
     .filter((trade) => selectedMarkets.size === 0 || selectedMarkets.has(trade.market))
     .slice()
     .sort((a, b) => a.timestamp - b.timestamp);
-}
-
-function filterTradesBySafety(
-  trades: Trade[],
-  plan: TraderOptimizationPlan | undefined,
-  candlesByMarket: Record<string, Candle[]>,
-) {
-  const resultByMarket = new Map(plan?.selectedMarkets.map((item) => [item.market, item.bestResult]) ?? []);
-  const safeTrades: Trade[] = [];
-  let includedPositionMarket: string | null = null;
-
-  for (const trade of trades.slice().sort((a, b) => a.timestamp - b.timestamp)) {
-    if (trade.side === "buy") {
-      const result = resultByMarket.get(trade.market);
-      const candles = candlesByMarket[trade.market] ?? [];
-      const candleIndex = findCandleIndexAtOrBefore(candles, trade.timestamp);
-      const candlesUntilTrade = candleIndex >= 0 ? candles.slice(0, candleIndex + 1) : candles;
-      const currentReturn = getDailyReturnAtTimestamp(candles, trade.timestamp);
-      const blocked = result ? evaluateAutoBlock(result, candlesUntilTrade, currentReturn).blocked : false;
-
-      if (blocked) {
-        includedPositionMarket = null;
-        continue;
-      }
-
-      includedPositionMarket = trade.market;
-      safeTrades.push(trade);
-      continue;
-    }
-
-    if (includedPositionMarket === trade.market) {
-      safeTrades.push(trade);
-      includedPositionMarket = null;
-    }
-  }
-
-  return safeTrades;
 }
 
 function filterMarketTradesBySafety(
@@ -2403,36 +2529,10 @@ function getMarketPaperReturn(trades: Trade[], candles: Candle[]) {
   return cumulativeReturn;
 }
 
-function rebuildEquityCurve(
-  result: DailyPaperResult,
-  trades: Trade[],
-  candlesByMarket: Record<string, Candle[]>,
-  fromTimestamp = -Infinity,
-) {
-  const sortedTrades = trades.slice().sort((a, b) => a.timestamp - b.timestamp);
-  let tradeIndex = 0;
-  let cash = result.initialCash;
-  let position: { market: string; quantity: number } | null = null;
-
-  return result.equityCurve.filter((point) => point.timestamp >= fromTimestamp).map((point) => {
-    while (tradeIndex < sortedTrades.length && sortedTrades[tradeIndex].timestamp <= point.timestamp) {
-      const trade = sortedTrades[tradeIndex];
-      if (trade.side === "buy" && !position) {
-        cash -= trade.price * trade.quantity + trade.fee;
-        position = { market: trade.market, quantity: trade.quantity };
-      } else if (trade.side === "sell" && position?.market === trade.market) {
-        cash += trade.price * trade.quantity - trade.fee;
-        position = null;
-      }
-      tradeIndex += 1;
-    }
-
-    const currentPrice = position ? findCandleAtOrBefore(candlesByMarket[position.market] ?? [], point.timestamp)?.close ?? 0 : 0;
-    return {
-      timestamp: point.timestamp,
-      value: cash + (position ? position.quantity * currentPrice : 0),
-    };
-  });
+function getPaperEquitySince(result: DailyPaperResult, fromTimestamp = -Infinity) {
+  return result.equityCurve
+    .filter((point) => point.timestamp >= fromTimestamp)
+    .map((point) => ({ timestamp: point.timestamp, value: point.value }));
 }
 
 function buildMarketTradeReturnPoints(trades: Trade[]) {
@@ -2472,13 +2572,18 @@ function findCandleIndexAtOrBefore(candles: Candle[], timestamp: number) {
   return selected;
 }
 
-function findCandleAtOrBefore(candles: Candle[], timestamp: number) {
-  const index = findCandleIndexAtOrBefore(candles, timestamp);
-  return index >= 0 ? candles[index] : null;
-}
-
 function formatGuideModeLabel(mode: GuideRuleMode) {
   return mode === "strict" ? "Guideline O" : "Guideline X";
+}
+
+function formatAutoBlockModeLabel(mode: AutoBlockMode) {
+  return mode === "enabled" ? "Safety O" : "Safety X";
+}
+
+function areMarketSetsEqual(left: string[] | undefined, right: string[] | undefined) {
+  if (!left || !right || left.length !== right.length) return false;
+  const leftSet = new Set(left);
+  return right.every((market) => leftSet.has(market));
 }
 
 function toTrendPoint(
@@ -2637,6 +2742,8 @@ function shortStrategyName(id: TraderId) {
   if (id === "momentum") return "General-A";
   if (id === "range-grid") return "General-B";
   if (id === "arbitrage") return "General-C";
+  if (id === "general-d") return "General-D";
+  if (id === "general-e") return "General-E";
   return "General-D";
 }
 

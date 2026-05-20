@@ -1,0 +1,491 @@
+import WebSocket from "ws";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { runPaperTradingSimulation, PaperTradingSession, type PaperTradingResult } from "../src/simulation/paperTrading";
+import type { TraderOptimizationPlan } from "../src/simulation/traderOptimization";
+import { strategies } from "../src/strategies";
+import type { Candle, GuideRuleMode, SafetyMode, Strategy, TraderId } from "../src/types/trading";
+
+type Mode = "wsO" | "wsX";
+
+interface MarketCachePayload {
+  generatedAt?: string;
+  selectedMarkets?: string[];
+  candlesByMarket: Record<string, Candle[]>;
+  retentionPolicy?: {
+    operationStartAt?: string;
+    resetFrom?: string;
+  };
+}
+
+interface PlanPayload {
+  plan: TraderOptimizationPlan;
+}
+
+interface UpbitTick {
+  type: string;
+  code: string;
+  trade_price: number;
+  trade_volume: number;
+  trade_timestamp: number;
+}
+
+interface LiveCandle {
+  market: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quoteVolume: number;
+}
+
+interface WsStrategyResult {
+  returnRate: number;
+  trades: number;
+  cash: number;
+  finalValue: number;
+  position: null;
+  startedAt: number;
+  endedAt: number;
+}
+
+const root = process.cwd();
+const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
+const outputDir = path.join(root, "public", "market");
+const outputPath = path.join(outputDir, "ws-live-results.json");
+
+const wsUrl = "wss://api.upbit.com/websocket/v1";
+const outputIntervalMs = 5_000;
+const reconnectDelayMs = 5_000;
+const closeProcessDelayMs = 1_500;
+const maxCandles = Number(process.env.WS_MAX_CANDLES ?? process.env.PAPER_MAX_CANDLES ?? 1440);
+const guideModes: GuideRuleMode[] = ["strict", "ignored"];
+const safetyModes: SafetyMode[] = ["enabled", "disabled"];
+const modes: Mode[] = ["wsO", "wsX"];
+
+let selectedMarkets: string[] = [];
+let operationStartAt: number | undefined;
+let connectedAt = "";
+let totalTicks = 0;
+let wsStatus: "connecting" | "connected" | "disconnected" = "connecting";
+let activeWs: WebSocket | null = null;
+
+const closedCandles: Record<string, Candle[]> = {};
+const liveCandle: Record<string, LiveCandle> = {};
+const lastMinute: Record<string, number> = {};
+const closeTimers = new Map<number, NodeJS.Timeout>();
+const intraminuteTradeLocks = new Set<string>();
+
+const plans: Record<GuideRuleMode, Partial<Record<TraderId, TraderOptimizationPlan>>> = {
+  strict: {},
+  ignored: {},
+};
+
+const sessions = makeSessionStore();
+
+async function init() {
+  const cache = await loadMarketCache();
+  operationStartAt = parseBoundary(cache.retentionPolicy?.operationStartAt ?? cache.retentionPolicy?.resetFrom);
+
+  await loadPlans();
+  selectedMarkets = getPlanMarkets();
+  if (selectedMarkets.length === 0) {
+    selectedMarkets = cache.selectedMarkets?.length ? cache.selectedMarkets : Object.keys(cache.candlesByMarket);
+  }
+  seedClosedCandles(cache);
+  seedSessions();
+  await writeOutput();
+
+  connect();
+  setInterval(() => {
+    writeOutput().catch((error) => console.error("[ws-live] output failed", error));
+  }, outputIntervalMs);
+  setInterval(logStatus, 60_000);
+
+  console.log(`[ws-live] Results: ${path.relative(root, outputPath)}`);
+}
+
+function getPlanMarkets() {
+  const markets = new Set<string>();
+  for (const guideRuleMode of guideModes) {
+    for (const strategy of strategies) {
+      const plan = plans[guideRuleMode][strategy.id];
+      for (const item of plan?.selectedMarkets ?? []) markets.add(item.market);
+    }
+  }
+  return [...markets].sort();
+}
+
+async function loadMarketCache() {
+  const cache = JSON.parse(await readFile(cachePath, "utf8")) as MarketCachePayload;
+  if (!cache.candlesByMarket || Object.keys(cache.candlesByMarket).length === 0) {
+    throw new Error(`No candles found in ${path.relative(root, cachePath)}`);
+  }
+  return cache;
+}
+
+async function loadPlans() {
+  for (const strategy of strategies) {
+    for (const guideRuleMode of guideModes) {
+      const planPath = path.join(
+        root,
+        "data",
+        "local",
+        "traders",
+        strategy.id,
+        "scenarios",
+        `optimization-${guideRuleMode}.json`,
+      );
+      const payload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      plans[guideRuleMode][strategy.id] = payload.plan;
+    }
+  }
+}
+
+function seedClosedCandles(cache: MarketCachePayload) {
+  const startAt = operationStartAt ?? 0;
+  for (const market of selectedMarkets) {
+    closedCandles[market] = (cache.candlesByMarket[market] ?? [])
+      .filter((candle) => candle.timestamp >= startAt)
+      .slice(-maxCandles);
+  }
+}
+
+function seedSessions() {
+  for (const mode of modes) {
+    for (const guideRuleMode of guideModes) {
+      for (const autoBlockMode of safetyModes) {
+        for (const strategy of strategies) {
+          const plan = plans[guideRuleMode][strategy.id];
+          if (!plan) continue;
+          const session = new PaperTradingSession(strategy, plan, {
+            guideRuleMode,
+            autoBlockMode,
+            maxCandles,
+          });
+          replaySession(session, strategy, plan, guideRuleMode, autoBlockMode);
+          sessions[mode][guideRuleMode][autoBlockMode][strategy.id] = session;
+        }
+      }
+    }
+  }
+}
+
+function replaySession(
+  session: PaperTradingSession,
+  strategy: Strategy,
+  plan: TraderOptimizationPlan,
+  guideRuleMode: GuideRuleMode,
+  autoBlockMode: SafetyMode,
+) {
+  const result = runPaperTradingSimulation(strategy, plan, closedCandles, { guideRuleMode, autoBlockMode, maxCandles });
+  for (const timestamp of result.decisions.map((decision) => decision.timestamp)) {
+    session.step(timestamp, closedCandles);
+  }
+}
+
+function connect() {
+  wsStatus = "connecting";
+  console.log(`[ws-live] Connecting to ${wsUrl}`);
+  const ws = new WebSocket(wsUrl);
+  activeWs = ws;
+
+  ws.on("open", () => {
+    wsStatus = "connected";
+    connectedAt = new Date().toISOString();
+    ws.send(
+      JSON.stringify([
+        { ticket: "currency-ws-live" },
+        { type: "trade", codes: selectedMarkets },
+      ]),
+    );
+    console.log(`[ws-live] Connected. Subscribed ${selectedMarkets.length} markets.`);
+  });
+
+  ws.on("message", (data: Buffer) => {
+    try {
+      const tick = JSON.parse(data.toString("utf8")) as UpbitTick;
+      if (tick.type === "trade") handleTick(tick);
+    } catch {
+      // Ignore malformed frames.
+    }
+  });
+
+  ws.on("close", () => {
+    wsStatus = "disconnected";
+    activeWs = null;
+    console.log(`[ws-live] Disconnected. Reconnecting in ${reconnectDelayMs / 1000}s.`);
+    setTimeout(connect, reconnectDelayMs);
+  });
+
+  ws.on("error", (error: Error) => {
+    console.error(`[ws-live] ${error.message}`);
+    ws.terminate();
+  });
+}
+
+function handleTick(tick: UpbitTick) {
+  const market = tick.code;
+  if (!selectedMarkets.includes(market)) return;
+  totalTicks += 1;
+
+  const tickTimestamp = tick.trade_timestamp;
+  const minuteTimestamp = Math.floor(tickTimestamp / 60_000) * 60_000;
+  const previousMinute = lastMinute[market];
+
+  if (previousMinute !== undefined && minuteTimestamp > previousMinute) {
+    const closed = closeLiveCandle(market);
+    if (closed) {
+      upsertCandle(closedCandles[market], closed);
+      scheduleCloseProcessing(closed.timestamp);
+    }
+    liveCandle[market] = newLiveCandle(market, tick, minuteTimestamp);
+  } else if (!liveCandle[market]) {
+    liveCandle[market] = newLiveCandle(market, tick, minuteTimestamp);
+  } else {
+    updateLiveCandle(liveCandle[market], tick);
+  }
+
+  lastMinute[market] = minuteTimestamp;
+  stepWsOIntraminute(market, tick.trade_price, tickTimestamp);
+}
+
+function stepWsOIntraminute(market: string, executionPrice: number, timestamp: number) {
+  const virtual = toVirtualCandle(market);
+  if (!virtual) return;
+  const candlesByMarket = withVirtualCandle(market, virtual);
+  const signalMarkets = new Set([market]);
+  const executionPrices = new Map([[market, executionPrice]]);
+  const minuteTimestamp = virtual.timestamp;
+
+  for (const guideRuleMode of guideModes) {
+    for (const autoBlockMode of safetyModes) {
+      for (const strategy of strategies) {
+        const key = sessionMinuteKey(guideRuleMode, autoBlockMode, strategy.id, minuteTimestamp);
+        if (intraminuteTradeLocks.has(key)) continue;
+        const session = sessions.wsO[guideRuleMode][autoBlockMode][strategy.id];
+        if (!session) continue;
+        const decision = session.step(timestamp, candlesByMarket, { signalMarkets, executionPrices });
+        if (decision.action !== "hold") intraminuteTradeLocks.add(key);
+      }
+    }
+  }
+}
+
+function scheduleCloseProcessing(timestamp: number) {
+  if (closeTimers.has(timestamp)) return;
+  const timer = setTimeout(() => {
+    closeTimers.delete(timestamp);
+    processClosedMinute(timestamp);
+  }, closeProcessDelayMs);
+  closeTimers.set(timestamp, timer);
+}
+
+function processClosedMinute(timestamp: number) {
+  for (const guideRuleMode of guideModes) {
+    for (const autoBlockMode of safetyModes) {
+      for (const strategy of strategies) {
+        const wsXSession = sessions.wsX[guideRuleMode][autoBlockMode][strategy.id];
+        wsXSession?.step(timestamp, closedCandles);
+
+        const wsOKey = sessionMinuteKey(guideRuleMode, autoBlockMode, strategy.id, timestamp);
+        if (!intraminuteTradeLocks.has(wsOKey)) {
+          sessions.wsO[guideRuleMode][autoBlockMode][strategy.id]?.step(timestamp, closedCandles);
+        }
+      }
+    }
+  }
+
+  for (const key of [...intraminuteTradeLocks]) {
+    if (key.endsWith(`:${timestamp}`)) intraminuteTradeLocks.delete(key);
+  }
+}
+
+async function writeOutput() {
+  const caseResults = {
+    strict: {
+      enabled: serializeCase("strict", "enabled"),
+      disabled: serializeCase("strict", "disabled"),
+    },
+    ignored: {
+      enabled: serializeCase("ignored", "enabled"),
+      disabled: serializeCase("ignored", "disabled"),
+    },
+  };
+  const fallbackCase = caseResults.ignored.disabled;
+
+  const output = {
+    connectedAt,
+    updatedAt: new Date().toISOString(),
+    status: wsStatus,
+    tickCount: totalTicks,
+    operationStartAt,
+    selectedMarkets,
+    caseResults,
+    wsO: fallbackCase.wsO,
+    wsX: fallbackCase.wsX,
+    liveCandles: Object.fromEntries(
+      Object.entries(liveCandle).map(([market, candle]) => [
+        market,
+        {
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+          timestamp: candle.timestamp,
+        },
+      ]),
+    ),
+  };
+
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(outputPath, `${JSON.stringify(output)}\n`, "utf8");
+}
+
+function serializeCase(guideRuleMode: GuideRuleMode, autoBlockMode: SafetyMode) {
+  return {
+    wsO: serializeMode("wsO", guideRuleMode, autoBlockMode),
+    wsX: serializeMode("wsX", guideRuleMode, autoBlockMode),
+  };
+}
+
+function serializeMode(mode: Mode, guideRuleMode: GuideRuleMode, autoBlockMode: SafetyMode) {
+  return Object.fromEntries(
+    strategies
+      .map((strategy) => {
+        const session = sessions[mode][guideRuleMode][autoBlockMode][strategy.id];
+        return session ? [strategy.id, serializeResult(session.result())] : null;
+      })
+      .filter((entry): entry is [TraderId, WsStrategyResult] => entry !== null),
+  );
+}
+
+function serializeResult(result: PaperTradingResult): WsStrategyResult {
+  return {
+    returnRate: result.returnRate,
+    trades: result.trades.length,
+    cash: result.finalValue,
+    finalValue: result.finalValue,
+    position: null,
+    startedAt: result.startedAt,
+    endedAt: result.endedAt,
+  };
+}
+
+function newLiveCandle(market: string, tick: UpbitTick, timestamp: number): LiveCandle {
+  return {
+    market,
+    timestamp,
+    open: tick.trade_price,
+    high: tick.trade_price,
+    low: tick.trade_price,
+    close: tick.trade_price,
+    volume: tick.trade_volume,
+    quoteVolume: tick.trade_price * tick.trade_volume,
+  };
+}
+
+function updateLiveCandle(candle: LiveCandle, tick: UpbitTick) {
+  candle.high = Math.max(candle.high, tick.trade_price);
+  candle.low = Math.min(candle.low, tick.trade_price);
+  candle.close = tick.trade_price;
+  candle.volume += tick.trade_volume;
+  candle.quoteVolume += tick.trade_price * tick.trade_volume;
+}
+
+function closeLiveCandle(market: string): Candle | null {
+  const candle = liveCandle[market];
+  if (!candle) return null;
+  return {
+    market,
+    timestamp: candle.timestamp,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+    quoteVolume: candle.quoteVolume,
+  };
+}
+
+function toVirtualCandle(market: string): Candle | null {
+  return closeLiveCandle(market);
+}
+
+function withVirtualCandle(market: string, virtual: Candle) {
+  return {
+    ...closedCandles,
+    [market]: upsertCopy(closedCandles[market] ?? [], virtual),
+  };
+}
+
+function upsertCandle(candles: Candle[], candle: Candle) {
+  const last = candles[candles.length - 1];
+  if (last?.timestamp === candle.timestamp) {
+    candles[candles.length - 1] = candle;
+  } else {
+    candles.push(candle);
+  }
+  if (candles.length > maxCandles) candles.splice(0, candles.length - maxCandles);
+}
+
+function upsertCopy(candles: Candle[], candle: Candle) {
+  const copy = candles.slice();
+  upsertCandle(copy, candle);
+  return copy;
+}
+
+function makeSessionStore() {
+  const store = {} as Record<Mode, Record<GuideRuleMode, Record<SafetyMode, Partial<Record<TraderId, PaperTradingSession>>>>>;
+  for (const mode of modes) {
+    store[mode] = {
+      strict: { enabled: {}, disabled: {} },
+      ignored: { enabled: {}, disabled: {} },
+    };
+  }
+  return store;
+}
+
+function sessionMinuteKey(
+  guideRuleMode: GuideRuleMode,
+  autoBlockMode: SafetyMode,
+  traderId: TraderId,
+  timestamp: number,
+) {
+  return `${guideRuleMode}:${autoBlockMode}:${traderId}:${timestamp}`;
+}
+
+function parseBoundary(value: string | undefined) {
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function logStatus() {
+  const fmt = (value: number | undefined) => `${(((value ?? 0) * 100)).toFixed(2)}%`;
+  const row = strategies
+    .map((strategy) => {
+      const o = sessions.wsO.ignored.disabled[strategy.id]?.result().returnRate;
+      const x = sessions.wsX.ignored.disabled[strategy.id]?.result().returnRate;
+      return `${strategy.id}: O ${fmt(o)} / X ${fmt(x)}`;
+    })
+    .join(" | ");
+  console.log(`[${new Date().toISOString().slice(11, 19)}] ticks ${totalTicks} | ${row}`);
+}
+
+init().catch((error) => {
+  console.error("[ws-live] Fatal:", error);
+  process.exit(1);
+});
+
+process.on("SIGINT", () => {
+  activeWs?.terminate();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  activeWs?.terminate();
+  process.exit(0);
+});
