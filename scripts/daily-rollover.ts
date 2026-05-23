@@ -1,9 +1,15 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { buildTraderOptimizationPlan, type TraderOptimizationPlan } from "../src/simulation/traderOptimization";
+import {
+  buildTraderOptimizationPlan,
+  compareOptimizationsByPureReturn,
+  type TraderOptimizationPlan,
+} from "../src/simulation/traderOptimization";
+import { defaultBacktestConfig, runBacktest } from "../src/simulation/backtest";
+import { scoreBacktestResult } from "../src/simulation/optimizer";
 import { strategies } from "../src/strategies";
-import type { BacktestResult, Candle, GuideRuleMode, Strategy } from "../src/types/trading";
+import type { BacktestResult, Candle, GuideRuleMode, Strategy, StrategyScenario } from "../src/types/trading";
 
 interface MarketCachePayload {
   source?: string;
@@ -39,13 +45,13 @@ const outputRoot = path.join(root, process.env.ROLLOVER_OUTPUT_ROOT ?? "data/loc
 const marketCachePath = path.join(root, process.env.ROLLOVER_MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-daily.json");
 const publicMarketCachePath = path.join(root, "public/market/upbit-krw-1m-daily.json");
 const candidateMarketCount = Number(process.env.ROLLOVER_CANDIDATE_MARKET_COUNT ?? 30);
-const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 30);
-const minCandles = Number(process.env.ROLLOVER_MIN_CANDLES ?? 240);
+const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 9);
 const runDashboardBuild = process.env.ROLLOVER_BUILD_DASHBOARD !== "false";
 const refreshTopMarkets = process.env.ROLLOVER_REFRESH_TOP30 !== "false";
 const writeMarketCache = process.env.ROLLOVER_WRITE_MARKET_CACHE !== "false";
 const requestDelayMs = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 120);
 const maxRetries = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
+const refitPreviousWeight = clamp(Number(process.env.ROLLOVER_REFIT_PREVIOUS_WEIGHT ?? 0.7), 0, 1);
 const guideRuleModes: GuideRuleMode[] = (process.env.ROLLOVER_GUIDE_RULE_MODES ?? "strict,ignored")
   .split(",")
   .map((mode) => mode.trim())
@@ -56,6 +62,12 @@ const explicitWindowEnd = parseKstTime(process.env.ROLLOVER_WINDOW_END_KST ?? pr
 const windowEnd = explicitWindowEnd ?? getKstDayStart(rolloverAt);
 const windowStart = explicitWindowStart ?? windowEnd - 24 * 60 * 60 * 1000;
 const generatedAt = new Date().toISOString();
+const expectedWindowCandles = Math.max(1, Math.floor((windowEnd - windowStart) / 60_000));
+const minCompletenessRatio = Number(process.env.ROLLOVER_MIN_COMPLETENESS_RATIO ?? 0.7);
+const minCandles = Number(
+  process.env.ROLLOVER_MIN_CANDLES ?? Math.floor(expectedWindowCandles * minCompletenessRatio),
+);
+const minEligibleMarkets = Number(process.env.ROLLOVER_MIN_ELIGIBLE_MARKETS ?? monitoringMarketCount);
 
 if (windowEnd <= windowStart) {
   throw new Error("Rollover window end must be after window start.");
@@ -65,12 +77,17 @@ const payload = await loadRolloverMarketCache();
 const windowCandlesByMarket = sliceCandlesByWindow(payload.candlesByMarket, windowStart, windowEnd);
 const availableMarkets = Object.values(windowCandlesByMarket).filter((candles) => candles.length >= minCandles).length;
 
-if (availableMarkets === 0) {
-  throw new Error(
-    `No markets have at least ${minCandles} candles in rollover window ${new Date(windowStart).toISOString()} - ${new Date(
-      windowEnd,
-    ).toISOString()}.`,
-  );
+if (availableMarkets < minEligibleMarkets) {
+  const reason = `Only ${availableMarkets} markets have at least ${minCandles}/${expectedWindowCandles} candles in the previous 24h window. Keeping existing parameters.`;
+  console.warn(`Daily rollover skipped: ${reason}`);
+  await writeRolloverStatus({
+    skipped: true,
+    skipReason: reason,
+  });
+  if (runDashboardBuild) {
+    await runCommand(process.execPath, [path.join(root, "scripts", "build-dashboard-results.mjs")]);
+  }
+  process.exit(0);
 }
 
 console.log(
@@ -81,25 +98,7 @@ for (const strategy of strategies) {
   await persistStrategy(strategy, payload, windowCandlesByMarket);
 }
 
-await writeJson(path.join(outputRoot, "daily-rollover-status.json"), {
-  generatedAt,
-  marketCache: {
-    path: path.relative(root, marketCachePath),
-    source: payload.source,
-    generatedAt: payload.generatedAt,
-    candleUnitMinutes: payload.candleUnitMinutes,
-  },
-  window: {
-    start: new Date(windowStart).toISOString(),
-    end: new Date(windowEnd).toISOString(),
-    startKst: formatKst(windowStart),
-    endKst: formatKst(windowEnd),
-  },
-  candidateMarketCount,
-  monitoringMarketCount,
-  minCandles,
-  guideRuleModes,
-});
+await writeRolloverStatus();
 
 if (runDashboardBuild) {
   await runCommand(process.execPath, [path.join(root, "scripts", "build-dashboard-results.mjs")]);
@@ -125,7 +124,8 @@ async function persistStrategy(
       minCandles,
       guideRuleMode,
     });
-    const compactPlan = compactOptimizationPlan(plan);
+    const smoothedPlan = await smoothRefitPlan(strategy, plan, candlesByMarket, guideRuleMode, marketParamsDir);
+    const compactPlan = compactOptimizationPlan(smoothedPlan);
     const exportPayload = {
       generatedAt,
       rollover: {
@@ -137,10 +137,13 @@ async function persistStrategy(
         minCandles,
       },
       marketCache: {
+        path: path.relative(root, marketCachePath),
         source: sourcePayload.source,
         generatedAt: sourcePayload.generatedAt,
         candleUnitMinutes: sourcePayload.candleUnitMinutes,
         cachedMarketCount: Object.keys(sourcePayload.candlesByMarket).length,
+        windowStart: new Date(windowStart).toISOString(),
+        windowEnd: new Date(windowEnd).toISOString(),
       },
       plan: compactPlan,
     };
@@ -158,7 +161,7 @@ async function persistStrategy(
     });
     await persistMarketParams(marketParamsDir, strategy, compactPlan, guideRuleMode);
 
-    if (guideRuleMode === "strict") {
+    if (guideRuleMode === "ignored") {
       await writeJson(path.join(traderDir, "selected-symbols.json"), {
         generatedAt,
         guideRuleMode,
@@ -173,6 +176,153 @@ async function persistStrategy(
       `${strategy.id}/${guideRuleMode}: ${compactPlan.candidateMarkets.length} candidates, ${compactPlan.selectedMarkets.length} monitoring`,
     );
   }
+}
+
+async function smoothRefitPlan(
+  strategy: Strategy,
+  plan: TraderOptimizationPlan,
+  candlesByMarket: Record<string, Candle[]>,
+  guideRuleMode: GuideRuleMode,
+  marketParamsDir: string,
+): Promise<TraderOptimizationPlan> {
+  if (refitPreviousWeight <= 0) return plan;
+
+  const optimizedMarkets = await Promise.all(
+    plan.optimizedMarkets.map((item) =>
+      smoothMarketOptimization(strategy, item, candlesByMarket[item.market] ?? [], guideRuleMode, marketParamsDir),
+    ),
+  );
+  const rankedByReturn = optimizedMarkets
+    .slice()
+    .sort(compareOptimizationsByPureReturn);
+
+  return {
+    ...plan,
+    optimizedMarkets: optimizedMarkets.slice().sort(compareOptimizationsByPureReturn),
+    selectedMarkets: rankedByReturn.slice(0, monitoringMarketCount),
+  };
+}
+
+async function smoothMarketOptimization(
+  strategy: Strategy,
+  item: TraderOptimizationPlan["optimizedMarkets"][number],
+  candles: Candle[],
+  guideRuleMode: GuideRuleMode,
+  marketParamsDir: string,
+) {
+  const previous = await loadPreviousMarketParams(marketParamsDir, item.market, guideRuleMode);
+  if (!previous?.params || candles.length === 0) return item;
+
+  const blendedParams = blendScenarioParams(previous.params, item.bestResult.scenarioParams ?? {}, refitPreviousWeight);
+  const snappedScenario = snapScenarioToGrid(strategy, blendedParams);
+  const scenario = createRefitScenario(
+    strategy,
+    item.bestResult,
+    snappedScenario?.params ?? blendedParams,
+    snappedScenario
+      ? {
+          scenarioId: snappedScenario.id,
+          scenarioName: snappedScenario.name,
+        }
+      : previous,
+  );
+  const bestResult = runBacktest(strategy, scenario, candles, {
+    ...defaultBacktestConfig,
+    guideRuleMode,
+  });
+
+  return {
+    ...item,
+    bestResult,
+    score: scoreBacktestResult(bestResult),
+  };
+}
+
+async function loadPreviousMarketParams(marketParamsDir: string, market: string, guideRuleMode: GuideRuleMode) {
+  try {
+    return JSON.parse(await readFile(path.join(marketParamsDir, `${market}.${guideRuleMode}.json`), "utf8")) as {
+      params?: Record<string, number>;
+      scenarioId?: string;
+      scenarioName?: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function blendScenarioParams(
+  previousParams: Record<string, number>,
+  nextParams: Record<string, number>,
+  previousWeight: number,
+) {
+  const nextWeight = 1 - previousWeight;
+  const keys = new Set([...Object.keys(previousParams), ...Object.keys(nextParams)]);
+  const blended: Record<string, number> = {};
+
+  for (const key of keys) {
+    const previous = previousParams[key];
+    const next = nextParams[key];
+    if (Number.isFinite(previous) && Number.isFinite(next)) {
+      const value = previous * previousWeight + next * nextWeight;
+      blended[key] = Number.isInteger(previous) && Number.isInteger(next) ? Math.round(value) : value;
+    } else if (Number.isFinite(next)) {
+      blended[key] = next;
+    } else if (Number.isFinite(previous)) {
+      blended[key] = previous;
+    }
+  }
+
+  return blended;
+}
+
+function createRefitScenario(
+  strategy: Strategy,
+  result: BacktestResult,
+  params: Record<string, number>,
+  previous?: { scenarioId?: string; scenarioName?: string } | null,
+): StrategyScenario {
+  const scenarioId = previous?.scenarioId ?? result.scenarioId;
+  const base =
+    strategy.scenarios?.find((scenario) => scenario.id === scenarioId) ??
+    strategy.scenarios?.find((scenario) => scenario.id === result.scenarioId) ??
+    strategy.scenarios?.[0] ??
+    strategy.defaultScenario;
+
+  return {
+    ...base,
+    id: scenarioId,
+    name: previous?.scenarioName ?? result.scenarioName ?? base.name,
+    params,
+  };
+}
+
+function snapScenarioToGrid(strategy: Strategy, params: Record<string, number>): StrategyScenario | null {
+  const scenarios = strategy.scenarios?.length ? strategy.scenarios : [strategy.defaultScenario];
+  if (scenarios.length === 0) return null;
+
+  return scenarios.reduce((best, current) =>
+    scenarioDistance(current.params, params) < scenarioDistance(best.params, params) ? current : best,
+  );
+}
+
+function scenarioDistance(candidateParams: Record<string, number>, targetParams: Record<string, number>) {
+  const keys = new Set([...Object.keys(candidateParams), ...Object.keys(targetParams)]);
+  let distance = 0;
+
+  for (const key of keys) {
+    const candidate = candidateParams[key];
+    const target = targetParams[key];
+    if (!Number.isFinite(candidate) || !Number.isFinite(target)) {
+      distance += 1;
+      continue;
+    }
+
+    const scale = Math.max(Math.abs(candidate), Math.abs(target), 1);
+    const normalized = (candidate - target) / scale;
+    distance += normalized * normalized;
+  }
+
+  return distance;
 }
 
 async function persistMarketParams(
@@ -446,8 +596,44 @@ async function writeJson(filePath: string, value: unknown) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+async function writeRolloverStatus(extra: Record<string, unknown> = {}) {
+  await writeJson(path.join(outputRoot, "daily-rollover-status.json"), {
+    generatedAt,
+    marketCache: {
+      path: path.relative(root, marketCachePath),
+      source: payload.source,
+      generatedAt: payload.generatedAt,
+      candleUnitMinutes: payload.candleUnitMinutes,
+    },
+    window: {
+      start: new Date(windowStart).toISOString(),
+      end: new Date(windowEnd).toISOString(),
+      startKst: formatKst(windowStart),
+      endKst: formatKst(windowEnd),
+    },
+    candidateMarketCount,
+    monitoringMarketCount,
+    expectedWindowCandles,
+    minCandles,
+    minEligibleMarkets,
+    availableMarkets,
+    guideRuleModes,
+    refit: {
+      previousWeight: refitPreviousWeight,
+      newWeight: 1 - refitPreviousWeight,
+      mode: "weighted-minor-adjustment",
+    },
+    ...extra,
+  });
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }

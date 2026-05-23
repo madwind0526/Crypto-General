@@ -42,14 +42,6 @@ const guideModes: GuideRuleMode[] = parseGuideModes(process.env.GUIDE_RULE_MODE)
 const safetyModes: SafetyMode[] = parseSafetyModes(process.env.SAFETY_MODE);
 const marketCache = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
 const startAt = parseKstStartAt(process.env.PAPER_START_AT_KST ?? process.env.PAPER_START_AT);
-if (startAt !== null) {
-  marketCache.candlesByMarket = Object.fromEntries(
-    Object.entries(marketCache.candlesByMarket).map(([market, candles]) => [
-      market,
-      candles.filter((candle) => candle.timestamp >= startAt),
-    ]),
-  );
-}
 const rows: SummaryRow[] = [];
 const results: Record<GuideRuleMode, Partial<Record<Strategy["id"], PaperTradingResult>>> = {
   ignored: {},
@@ -69,6 +61,7 @@ for (const strategy of strategies) {
         autoBlockMode,
         guideRuleMode,
         maxCandles,
+        startAt,
       });
       caseResults[guideRuleMode][autoBlockMode][strategy.id] = result;
       if (autoBlockMode === "disabled") results[guideRuleMode][strategy.id] = result;

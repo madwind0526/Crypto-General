@@ -2,151 +2,72 @@
 
 ## Current Work
 
-The project now has an initial Vite + React + TypeScript application skeleton. It includes an Upbit public-data adapter, sample data fallback, technical indicators, four strategy modules, scenario preset optimization, a deterministic backtest runner, and a left-menu dashboard for scenario building, reports, and daily operation simulation on cached real Upbit public candles.
+Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashboard for Upbit KRW markets. The current General workflow uses 1-minute candles, 7-day baseline backtracking, top-30 candidate selection by recent trade value, and top-9 monitoring selection by optimized pure return. Daily Operation displays those 9 markets as a responsive 3x3 board.
 
 ## Latest Decisions
 
-- Use the Shelter-Defence project as the structural reference: root `AGENTS.md`, `memory-bank/`, and clear module ownership.
-- Keep this project local-first at the beginning.
-- Start with simulation and paper-style decisions before any live exchange trading.
-- Exchange/data source selected: Upbit, focused on the user's existing Upbit account and KRW markets.
-- Initial Upbit integration should use public Quotation APIs only for market/candle/ticker/orderbook data. API keys are not required for historical simulation.
-- Private Upbit APIs should be added later in two steps: read-only account balance first, then order placement only after paper trading and safety controls are complete.
-- Model the project around four trader personas:
-  - Momentum Trader
-  - Mean Reversion Trader
-  - Fear/Greed Trader
-  - Anomaly/Symbol-Specific Trader
-- Track 12 watched symbols per active scenario.
-- Show a visible active-trade marker when a symbol is currently being traded.
-- Recommended first trading method: regime-filtered momentum/trend following. It is the best first implementation candidate because it is common, rule-based, easy to backtest, and fits the "choose the best one among 12 symbols" workflow.
-- Later candidate methods: range/grid mean reversion for sideways markets, and statistical/funding-style arbitrage after stronger data/execution infrastructure exists.
-- The user now wants all four strategy families implemented and backtested so each can search for its own highest-profit scenario, then compare the best result from each family.
-- The fourth strategy is an anomaly/pump-signal detection trader. It should detect suspicious rapid price/volume behavior in suitable low/mid-liquidity coins, select 12 likely candidates daily, watch for early signals, and exit quickly under strict rules.
-- Compliance boundary: do not build tools to coordinate, promote, or participate in pump-and-dump activity. The model may only analyze public market data and simulate/paper-trade strict-risk responses.
-- Windows app direction: build the core as a Vite web app first, then package as a Windows desktop app later with Tauri or Electron. Tauri is the preferred first packaging candidate because it can keep the app smaller and still support local files.
-- Current Upbit cache: top 30 KRW markets by 24h trade value, 5-minute candles, 90-day lookback, stored at `data/market/upbit-krw-5m.json` and served to the app from `public/market/upbit-krw-5m.json`.
-- The top-30 cache is fetched as three 30-day chunks (`upbit-krw-5m-top30-30-0d.json`, `upbit-krw-5m-top30-60-30d.json`, `upbit-krw-5m-top30-90-60d.json`) and merged with duplicate timestamps removed.
-- Current optimizer compares curated scenario presets per strategy, then selects the best strategy/scenario/market combination by score.
-- UI navigation now uses a `View` dropdown with `Summary` plus each trader. `Summary` shows the comparison table; individual trader views show profile, selected best result, and recent simulated trades.
-- Market cards now use candlestick + quote-volume charts with crosshair hover tooltips. A global interval control aggregates the small charts by N minutes, N hours, N days, or N months.
-- Clicking a market card opens a large modal chart with the same candlestick/volume/hover behavior and its own interval control.
-- Charts now cap the number of rendered X-axis candles by interval and variant. Mouse-wheel scrolling over a chart pans the visible time window left/right across the cached history.
-- Large charts support click-to-measure points. The first candle click records P1, the second records P2, and the panel summarizes price difference, return, elapsed time, and volume/value difference.
-- The anomaly trader needs 1-minute candles. Keep 5-minute candles as the main dashboard cache and store 1-minute candles separately under `data/market/upbit-krw-1m.json` for anomaly training/simulation so the browser does not load the huge file by default.
-- Revised anomaly data approach: select 12 candidates daily from all KRW markets using 90 days of compressed 5m/10m history, monitor only those 12 at 1-minute resolution, compress normal monitoring data before storage, retain only 90 days, and keep raw 1-minute data only around triggered events.
-- Added `GUIDERULES.md` as the project-level trading rule reference. It records A/B/C trader top-30 optimization -> top-12 monitoring flow, D trader anomaly flow, and strict versus ignored guide-rule split for every trader.
-- `GUIDERULES.md` has started to become executable code. `src/guideRules/evaluator.ts` now evaluates Dow structure, moving averages, support/resistance, and candlestick warnings. `runBacktest` applies `guideRuleMode: strict | ignored`, records `signalAudit`, and counts `guideRejectedSignals`.
-- A/B/C-style trader optimization now has a reusable pure module: `src/simulation/traderOptimization.ts`. It selects candidate markets by recent quote trade value, optimizes scenarios per market, ranks by backtest score, and returns the monitoring selection.
-- Backtest results can now be viewed as a strict/ignored guide-rule split in the dashboard summary.
-- The D trader now has a pure anomaly monitoring module: `src/simulation/anomalyMonitor.ts`. It builds daily anomaly monitoring plans from historical candidates and detects latest-candle volume/acceleration/breakout signals.
-- A reusable daily operation decision engine exists in `src/simulation/dailyOperation.ts`. It chooses hold/buy/sell/rotate from ranked signals and the current position.
-- The dashboard now uses a two-pane layout: a persistent left menu and a right workspace for login placeholder, scenario building, reports, and Daily Operation Simulation.
-- Daily Operation Simulation has four views: General-A, General-B, General-C, and anomaly. Each view has a Guideline O/X toggle and centers on the selected 12 monitoring charts.
-- Clicking a Daily Operation chart opens a popup with a large graph, trade history, hourly return table, and hourly balance table across the four strategy cases.
-- Scenario and guideline screens expose import/export controls as UI hooks. Import currently reads the selected JSON filename; validation and applying imported strategy files are still pending.
-- Korean UI strings in trader profiles and strategy-refresh labels were repaired after previous mojibake.
-- Daily Operation now prefers a dedicated 1-minute cache at `public/market/upbit-krw-1m-daily.json` when present, falling back to the 5-minute dashboard cache otherwise.
-- Added `npm run fetch:upbit:1m:daily` to fetch recent 1-minute candles for the union of selected monitoring markets.
-- Added `npm run paper:sim:1m:daily` to run all four traders in strict and ignored guide-rule modes over the latest 1-minute daily cache.
-- Latest 1-minute daily simulation used 26 selected Upbit KRW markets, max 1,440 candles. Results: General-A strict +0.58%, ignored -4.53%; General-B strict -0.77%, ignored -6.79%; General-C strict +1.95%, ignored -1.72%; anomaly strict/ignored 0.00% with no trades.
-- General scenario Report now shows A, B, and C as separate report sections with their own metrics and monitoring selections.
-- The strategy refresh UI is split into General Refresh and Anomaly Refresh. The Vite refresh API accepts `scope=general` for the heavier top-30/5m optimization pipeline and `scope=anomaly` for the 1m daily fetch plus 1m paper simulation flow.
-- Daily Operation cards are sorted by the latest visible candle return, so each refresh redraws the 12 charts in return order. This is cheap because only 12 cards are sorted client-side.
-- Daily Operation chart cards now pass 1-minute paper-simulation trades to `MarketChart`, so buy/sell markers appear as `B` and `S` symbols on mini and large charts when trades exist.
-- The Daily Operation popup now uses a scrolled trade-history table and SVG trend graphs for return and balance instead of only tabular hourly values.
-- General scenario screens no longer show A/B/C details all at once. General scenario building and General scenario Report now use A/B/C choice tabs and display only the selected General strategy detail.
-- General scenario Report shows the selected strategy's top RANK table as the top 3 candidates, while the lower PICK table still shows all 12 selected monitoring candidates.
-- Daily Operation now has an independent Auto Block O/X selector beside Guideline O/X. The current decision layer treats the four cases as Guideline O/X x Auto Block O/X and blocks risky buy signals into hold when auto-block is enabled.
-- Daily Operation chart cards now separate interactions: clicking a card opens only that market's large graph, while each card's Trades/Return/Balance buttons open a current-scenario aggregate popup across the 12 monitored markets. The aggregate popup filters by Guideline O/X and Safety O/X; trade history is chronological across the 12 markets, return trends show only traded markets, and balance trends show the selected scenario's total portfolio balance.
-- Daily Operation summary removed the redundant Case tile and now shows the four remaining summary tiles in one compact desktop row.
-- Daily Operation removed per-card Trades/Return/Balance buttons from inside chart cards; the aggregate buttons now live in the 12-market panel header.
-- Daily Operation return trend lines now use a stable color per market, while Guideline/Safety combinations are distinguished by line patterns.
-- Daily Operation return trend legends are split into Coin color labels and Guideline/Safety line-style labels.
-- Daily Operation trend graphs now show y-axis tick labels and horizontal guide lines for return and balance views.
-- Daily Operation chart markers now use the same Safety O/X filtered trade set as the aggregate Trades popup, so blocked trades no longer appear on cards when Safety O is active.
-- Daily Operation card ordering now prioritizes markets with Safety-filtered daily paper trades, then sorts those markets by per-market daily paper return; non-traded markets fall back to current candle-window return.
-- The redundant Daily Operation 기준 panel was removed from Daily Operation screens.
-- Daily Operation sidebar entries now show only the scenario names; redundant Guideline O/X captions were removed.
-- The app now polls Daily Operation market cache and paper simulation results every 15 seconds, so marathon test updates automatically refresh cards, graphs, trade tables, return trends, and balance trends.
-- The app stores the active sidebar screen in localStorage, so browser refresh returns to the screen the user was viewing instead of Summary.
-- Daily Operation Balance trend popups now default to Guideline All / Safety All, and large/trend charts reserve more y-axis label space so price and balance labels are not clipped.
-- Daily Operation Guideline O/X and Auto Block O/X controls are synchronized across General-A, General-B, General-C, and anomaly screens; changing one Daily scenario changes the same mode on the others.
-- Report screens now show both Guideline O/X and Auto Block O/X controls, synchronized with Daily Operation. Daily Operation card return labels now match the sorting rule: traded markets show daily paper return, while non-traded markets show the fallback price-window return.
-- A 24-hour day-trading marathon simulation was started in the background on 2026-05-14 16:45 KST. Runtime status is written to `data/local/paper-trading-1m-daily/marathon-status.json`; logs are under `data/local/paper-trading-1m-daily/logs/`.
-- Daily anomaly operation should not continuously rotate monitoring symbols during a marathon run. The preferred operating model is to choose the 12 anomaly monitoring symbols once per day at a fixed scheduled time, keep the previously backtested strategy/scenario assignment during the day, and only change strategy parameters through an explicit Strategy Refresh.
-- The first marathon run was paused at cycle 167 for code-review fixes. Applied fixes include Upbit retry/backoff wrappers in the TS client and marathon/fetch scripts, explicit anomaly lookback guards, binary-search candle lookup in paper trading, momentum max ATR as a scenario parameter, corrected arbitrage z-score calculation, KST UI time formatting, and repair of broken UI strings.
-- Daily Operation now shows card top-right as the current price return from the visible daily baseline, and the card summary as BUY/SELL/BLOCK counts plus the coin's paper return. The large market popup shows the same current-return and trade-summary metrics. Daily Operation top summary now shows best coin, best coin trade counts, best coin return, and total portfolio return for the active Guideline/Safety setting.
-- UI terminology now presents Auto Block as Safety. Base Guideline was renamed to Base Guideline/Safety, exposes Guideline O/X and Safety O/X buttons, and those controls synchronize with reports and Daily Operation screens. The General Scenario Report no longer renders the extra Monitoring Selection Summary block at the bottom.
-- Daily Operation daily metrics now reset at 00:00 KST every day. Card current-return, BUY/SELL/BLOCK counts, per-coin paper return, aggregate trade tables, return trends, and balance trends only include events from the active KST day, so the longest daily window is 24 hours before it resets.
-- Summary middle report now renders a compact Guideline/Safety 4-case comparison. Each strategy has one row with O/O, O/X, X/O, and X/X cells showing return, max drawdown, trades, and blocked count. Safety O is currently an estimated overlay that replays the same backtest trades after applying the automatic block rules.
-- A fresh 24-hour marathon run was started on 2026-05-14 21:17 KST with `MARATHON_START_AT_KST=2026-05-14T19:15:00+09:00` and `MARATHON_RESET_CACHE=true`. The 1-minute daily cache was reset so chart x-axes start no earlier than 2026-05-14 19:15 KST.
-- MarketChart now formats lightweight-charts x-axis ticks and crosshair time labels in Asia/Seoul, so the chart axis no longer shows UTC while custom tooltips show KST.
-- UI market labels now hide the `KRW-` prefix while preserving the original `KRW-*` market ids internally for data lookup and simulation matching.
-- The former anomaly screen/strategy slot is now used as General-D Range Re-entry. General-D is based on General-B range logic, blocks downtrend entries, sells after the configured profit target with trend-aware trailing, and only re-enters the same coin after a pullback from the last sell price.
-- General-D backtracking was run against the existing 90-day 5-minute Upbit cache. The optimizer now persists per-coin selected scenario parameters under `data/local/traders/general-d/scenarios/optimization-*.json`, and daily 1-minute paper results now include `general-d`.
-- Scenario Builder and Strategy Report now treat General-D as part of General Scenario: General-D's separate Scenario/Report menu entries were removed, and the General scenario/report tabs now expose A/B/C/D together.
-- Daily monitoring selection now keeps the full top-30 trading-value universe per strategy instead of trimming the persisted plan to 12. Each market receives a persisted per-strategy/per-guide parameter file under `data/local/traders/<strategy>/market-params/`, and Daily Operation displays only the top 12 sorted by trade occurrence, daily paper return, then current price return.
-- General Scenario Report monitoring tables now default-sort by return descending, and every column header can be clicked to toggle ascending/descending sorting.
-- `paper-trading-1m-daily.ts` now supports `PAPER_START_AT_KST`/`PAPER_START_AT` and `PAPER_PUBLIC_OUTPUT_PATH`, so one-off daily backtracking can run from an exact KST start without overwriting the normal Daily Operation result file.
-- The 1-minute paper simulation script now runs Guideline O/X x Safety O/X as true separate cases. Safety O blocks buy signals before daily operation selection and records `safetyBlockedSignals`; default `results` remains Safety X for UI compatibility, while `caseResults` contains all four cases.
-- Added a daily rollover path for the marathon workflow. `npm run paper:daily-rollover` takes the previous 24-hour KST window, chooses the top 30 KRW markets by trade value, re-optimizes each General A/B/C/D strategy over that window, persists 30 monitoring entries plus per-market parameter files, and rebuilds dashboard results by default. `paper:marathon:day` now detects a KST date change, runs that rollover, reloads selected markets, and resets its effective daily cache start to 00:00 KST.
-- On 2026-05-16 00:13 KST, a manual daily rollover was run as if the current time were the new 00:00 boundary. The rollover optimized the previous 24h window, 2026-05-15 00:13 KST to 2026-05-16 00:13 KST, with 29 eligible markets. A fresh 24h marathon was then started at 2026-05-16 00:14:58 KST with cache reset and daily rollover enabled.
-- Daily Operation chart data is now decoupled from the operation reset boundary. The 1-minute cache keeps retained historical candles so charts continue from before the daily start, while paper simulation and daily trade/return summaries use `operationStartAt` as the reset boundary. Market charts draw a highlighted vertical line at `operationStartAt` to show the daily operation start point.
-- The daily-start marker was changed from a DOM overlay to a lightweight-charts series primitive. The marker snaps to the nearest visible candle timestamp, so it remains visible even when the operation start time falls between aggregated candle timestamps.
-- Code-review fixes on 2026-05-16 tightened the 00:00 KST operating model. Daily rollover now tries to refresh the actual Upbit KRW 24h trading-value top 30, backfills the previous 24h of 1-minute candles for those markets, writes the refreshed daily cache, and then optimizes General A/B/C/D over that window. If the Upbit refresh fails, it falls back to the existing cache so a marathon run can continue.
-- Daily Operation now reads the active Guideline/Safety case from `caseResults` instead of estimating Safety O in the UI from Safety X trades. The 1-minute paper simulation records `safetyBlockedByMarket` so card-level BUY/SELL/BLOCK summaries can show per-coin block counts after paper simulation runs.
-- General Scenario Report sorting still defaults to Return descending, but the Pick column now preserves the original monitoring pick number after sorting instead of renumbering visible rows.
-- WebSocket live simulation was realigned with the paper-trading engine. `ws-live.ts` now reuses `PaperTradingSession` for WS-O and WS-X across all Guideline/Safety cases instead of running a separate simplified strategy engine. WS-X is candle-close only and should match the original 1-minute flow, while WS-O evaluates the updated in-minute candle and falls back to candle-close processing when no in-minute trade occurs.
-- `PaperTradingSession` now updates open-position `highestPrice` and `holdCandles`, supports tick execution prices, and can evaluate only the market affected by an in-minute WebSocket tick.
-- Added General-E Average Drop Cycle. It tests 1/3/5/10-minute average trade-price windows, entry drops from -1% through <= -5%, average-stop thresholds from 0% through <= -5%, and take-profit thresholds from +1% through >= +5%. General-E is included in scenario builder tabs, General Report, Daily Operation, dashboard result generation, daily paper simulation, daily fetch market union, marathon market union, and WS live simulation.
-- Fixed a WS live restart issue where an old legacy WS process kept overwriting `public/market/ws-live-results.json` without `caseResults`, causing the UI to show "재시작 필요". WS live now subscribes to the union of persisted strategy plan markets instead of the mutable 1-minute cache's `selectedMarkets`, and strategy indicator caches include candle length/latest timestamp so live-appended candle arrays do not reuse stale indicator arrays.
-- Marathon execution is now guarded against silent stalls. `day-trading-marathon.mjs` uses Upbit fetch timeouts, child-process timeouts, PID/status files, and signal/error status cleanup. `marathon-watchdog.mjs` can run the 24-hour marathon and restart it when the child exits early or `marathon-status.json` stops updating for too long.
-- A watchdog-backed 24-hour marathon run was started on 2026-05-20 21:13 KST with operation start `2026-05-20T21:13:01+09:00`. It reached cycle 4 by 21:16 KST, and WS live was restarted against the fresh daily cache with connected status and 29 markets.
-- Daily Operation charts now mark blocked buy signals. `PaperTradingSession` records `blockedSignals` for Guideline-rejected buys and Safety-rejected buys. `MarketChart` renders those blocked events as `X` markers: sky blue for Guideline blocks and red for Safety blocks, on both mini charts and the large market popup.
-- Trader optimization outputs are persisted under `data/local/traders/<trader>/`. Paper simulation outputs are persisted under `data/local/paper-trading/<trader>/`.
+- Keep the project local-first and simulation/paper-trading only. Real-money order placement is out of scope until audit logs, risk controls, duplicate-order prevention, emergency stops, and paper validation are much stronger.
+- Upbit public market data is the current data source. API keys are not needed for the current historical and paper workflows.
+- The active General strategies are:
+  - General-A: Momentum / Trend Following.
+  - General-B: Range / Grid Mean Reversion.
+  - General-C: Statistical / Relative Value.
+  - General-D: Range Re-entry.
+  - General-E: Average Drop Cycle.
+- The old in-repo anomaly slot was replaced by General-D. The separate `C:\Claude\Crypto-Anomaly` project owns anomaly-specific strategy behavior.
+- Default operating view: `1 minute / 6 hours`, Guideline X, Safety X, pure return-rate ranking.
+- Baseline backtracking uses `data/market/upbit-krw-1m-backtracking.json` and `npm run persist:traders`.
+- `persist:traders` writes strict/ignored optimization plans and selected symbols under `data/local/traders/<strategy>/`.
+- `build:dashboard-results` rebuilds `public/market/dashboard-results.json` from persisted optimization plans.
+- Daily paper simulation uses retained warm-up candles before the operation boundary, but trade/return/balance accounting starts at the Daily Operation boundary, normally 00:00 KST.
+- Daily rollover skips refit if the previous 24-hour 1-minute window is insufficient. If enough data exists, it blends previous parameters and newly optimized 24-hour parameters with a conservative previous/new weight, then snaps to the nearest valid scenario grid.
+- WebSocket simulation compares:
+  - WS X: candle-close-only behavior, intended to match the normal 1-minute paper flow.
+  - WS O: in-minute trigger execution, falling back to candle-close processing when no in-minute trade occurs.
+- Guideline-blocked buy signals are shown as sky-blue X markers. Safety-blocked buy signals are shown as red X markers. Guideline block color takes priority when both reasons apply.
+
+## Recent Implementation Notes
+
+- General-E tests 5/10/30/60-minute average trade-price windows, entry drops from -1% through <= -5%, average-stop thresholds from 0% through <= -5%, and take-profit thresholds from +1% through >= +5%.
+- Daily Operation card sizing, chart height, font sizes, and price-axis width now respond to the browser window.
+- `PaperTradingSession` is the shared engine for Daily Operation and WS live simulation.
+- Current code-review fixes include:
+  - backtest and paper risk exits use emergency-stop fallbacks;
+  - backtest and paper do not immediately re-enter the same market on a risk-exit candle;
+  - paper risk exits now include stop-loss, trailing-stop, and take-profit behavior;
+  - WS-O locks a minute when any in-minute trade occurs, including risk-rule exits;
+  - dashboard result generation skips empty selected plans and preserves full top-30 optimization plans;
+  - Summary best-case selection uses pure return rate;
+  - readable Korean trader profile strings were restored.
+- After the latest fixes, `npm run persist:traders`, `npm run build:dashboard-results`, `npm run test`, and `npm run build` were rerun. Generated dashboard results now keep 30 candidate markets, 30 optimized markets, and 9 selected markets per General strategy plan, and selected best results include trade/equity detail for Summary Safety comparison.
+- `dashboard-results.json` now includes precomputed Guideline/Safety case comparison rows generated from the same source cache used to rehydrate the selected backtest results. The UI uses these generated rows first, avoiding a mismatch between 1-minute backtracking trades and the 5-minute dashboard display cache.
+- Rollover optimization payloads now record the source cache path and optimization window. Dashboard result generation uses that path/window when rehydrating selected backtests, so a 24-hour rollover result is not accidentally recomputed over the whole retained daily cache.
+- Backtest and paper trailing stops now use the previous high-water mark before updating with the current candle high, which avoids optimistic same-candle high-before-low assumptions.
+- WS-O intraminute locks now block repeated signal evaluation for the locked minute but still allow later tick risk checks. Risk checks are scoped to the ticked market so another market's tick cannot close an open position using stale candles. Backtest risk-rule exits also apply sell slippage to match paper trading.
 
 ## Important Assumptions
 
-- "Local storage folder" means durable local project data under `data/local/traders/` for reproducible files, while the eventual browser UI may also use IndexedDB/localStorage for app state.
-- The first implementation should avoid real-money orders.
-- The user wants maximum profit, but the implementation should expose risk controls because crypto markets can lose money quickly.
-- The initial UI is likely a dashboard/tool surface, not a landing page.
+- "Local storage folder" means durable local project data under `data/local/traders/` for reproducible files, while the browser UI may also use local state for convenience.
+- Backtracking returns and Daily Operation returns can differ because backtracking is per-market historical evaluation, while Daily Operation is a one-position portfolio loop that rotates across the selected markets.
+- Profit maximization must stay paired with risk controls because crypto markets can lose money quickly.
 
 ## Current Blockers
 
-- Top-30 data, trader plan persistence, and first paper simulation are wired. One currently selected top-30 market may still be excluded from optimization when it has insufficient history.
-- Initial simulation interval is 5-minute candles over roughly 90 days. This is better for early comparison, but robust optimization still needs walk-forward validation and out-of-sample checks.
-- Fee, slippage, order size, stop loss, and portfolio constraints are not yet defined.
-- The anomaly/pump-signal trader needs higher-resolution data than daily candles. Recommended minimum: 1m or 5m OHLCV; ideally trade ticks and order-book snapshots.
-- Need a clear backtest optimizer policy to avoid overfitting and lookahead bias.
-- Dependencies need to be installed and the first build/test run needs to pass.
+- Walk-forward validation and out-of-sample acceptance rules are still needed to reduce overfitting.
+- A selected top-30 market can still be excluded from optimization when it has insufficient 1-minute history.
+- Fee, slippage, order size, max daily loss, and portfolio constraints need stronger test coverage before any real-money discussion.
 
 ## Recommended Tools
 
-- Vite + TypeScript for a fast local dashboard.
-- lightweight-charts or ECharts for multi-symbol price/trend displays.
-- IndexedDB for browser-side local state and cached UI data.
-- Files under `data/` for reproducible scenarios, market caches, and trade logs.
-- A public exchange market-data API such as Binance, Coinbase, Kraken, or Upbit/Bithumb depending on the intended market.
-- Backtesting engine built as deterministic TypeScript modules first.
-- Vitest for strategy and indicator tests once the package is initialized.
-- Walk-forward validation and out-of-sample testing for scenario optimization.
-- Public regulatory references for the anomaly trader safety boundary:
-  - CFTC virtual currency pump-and-dump advisory: https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/beware_virtual_currency_pump_dump.html
-  - SEC 2024 crypto asset manipulation enforcement release: https://www.sec.gov/newsroom/press-releases/2024-166
-- Upbit official docs:
-  - Korean overview: https://docs.upbit.com/kr/reference
-  - API key guide: https://global-docs.upbit.com/docs/api-key
-  - Authentication guide: https://global-docs.upbit.com/reference/authentication
+- Vite + TypeScript + React for the local dashboard.
+- lightweight-charts for market visualization.
+- Vitest for strategy, indicator, simulation, and persistence tests.
+- Files under `data/` and `public/market/` for reproducible market caches, strategy plans, and paper results.
 
 ## Next Startup Checklist
 
-1. Read `AGENTS.md` and all files in `memory-bank/`.
-2. Read `GUIDERULES.md` before changing strategy, signal, ranking, or execution behavior.
-3. Use the existing Vite + React + TypeScript app skeleton.
-4. Use Upbit as the first exchange/data source.
-5. Choose candle intervals and historical lookback period.
-6. Replace the current top-12-by-volume selector with strategy-specific candidate ranking.
-7. Run install/build/test before adding more behavior.
-8. Add true parameter sweeps and walk-forward validation before private API integration.
+1. Read `AGENTS.md`, `GUIDERULES.md`, and all files in `memory-bank/`.
+2. Use the existing Vite + React + TypeScript app skeleton.
+3. Use Upbit public data as the current data source.
+4. Preserve the current 1-minute, 7-day baseline backtracking and top-30 -> top-9 monitoring workflow unless the user changes it.
+5. Run `npm run test` and `npm run build` after strategy, simulation, script, or UI changes.

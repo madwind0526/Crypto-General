@@ -17,11 +17,12 @@ const guideRuleModes: GuideRuleMode[] = (process.env.GUIDE_RULE_MODES ?? "strict
   .split(",")
   .map((mode) => mode.trim())
   .filter((mode): mode is GuideRuleMode => mode === "strict" || mode === "ignored");
-const marketCachePath = path.join(root, process.env.MARKET_CACHE_PATH ?? "data/market/upbit-krw-5m.json");
+const marketCachePath = path.join(root, process.env.MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-backtracking.json");
 const outputRoot = path.join(root, "data", "local", "traders");
 const candidateMarketCount = Number(process.env.CANDIDATE_MARKET_COUNT ?? 30);
-const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 30);
-const optimizationLookbackCandles = Number(process.env.OPTIMIZATION_MAX_CANDLES ?? 3000);
+const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 9);
+const tradeValueLookbackCandles = Number(process.env.TRADE_VALUE_LOOKBACK_CANDLES ?? 1440);
+const optimizationLookbackCandles = Number(process.env.OPTIMIZATION_MAX_CANDLES ?? 10_080);
 
 const payload = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
 const generatedAt = new Date().toISOString();
@@ -43,6 +44,7 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
     const plan = buildTraderOptimizationPlan(strategy, payload.candlesByMarket, {
       candidateMarketCount,
       monitoringMarketCount,
+      tradeValueLookbackCandles,
       optimizationLookbackCandles,
       guideRuleMode,
     });
@@ -50,6 +52,7 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
     const exportPayload = {
       generatedAt,
       marketCache: {
+        path: path.relative(root, marketCachePath),
         source: payload.source,
         generatedAt: payload.generatedAt,
         candleUnitMinutes: payload.candleUnitMinutes,
@@ -69,7 +72,7 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
     });
     await persistMarketParams(marketParamsDir, strategy, compactPlan, guideRuleMode, generatedAt);
 
-    if (guideRuleMode === "strict") {
+    if (guideRuleMode === "ignored") {
       await writeJson(path.join(traderDir, "selected-symbols.json"), {
         generatedAt,
         guideRuleMode,
@@ -103,7 +106,8 @@ async function persistMarketParams(
       scenarioName: item.bestResult.scenarioName,
       params: item.bestResult.scenarioParams,
       lookbackCandles: optimizationLookbackCandles,
-      source: "daily-top-30-backtracking",
+      tradeValueLookbackCandles,
+      source: "1m-7d-backtracking",
     });
   }
 }

@@ -175,8 +175,8 @@ const chartIntervalPresets: Array<{ interval: ChartInterval; label: string; valu
   { interval: { value: 30, unit: "minute" }, label: "30 minutes", value: "30m", windowLabel: "1 week" },
   { interval: { value: 1, unit: "hour" }, label: "1 hour", value: "1h", windowLabel: "1 month" },
 ];
-const dailyDisplayMarketCount = 12;
-const dailyMonitoringMarketCount = 30;
+const dailyDisplayMarketCount = 9;
+const dailyMonitoringMarketCount = 9;
 
 const menuSections: MenuSection[] = [
   {
@@ -216,22 +216,22 @@ const dailyScreens: Record<
   "daily-general-a": {
     title: "General-A Daily Operation",
     traderId: "momentum",
-    description: "추세/모멘텀 기반으로 12개 후보를 감시하고 가장 강한 매수 신호를 선택합니다.",
+    description: "추세/모멘텀 기반으로 9개 후보를 감시하고 가장 강한 매수 신호를 선택합니다.",
   },
   "daily-general-b": {
     title: "General-B Daily Operation",
     traderId: "range-grid",
-    description: "박스권/평균회귀 기반으로 12개 후보를 감시하고 과매도 반등 구간을 찾습니다.",
+    description: "박스권/평균회귀 기반으로 9개 후보를 감시하고 과매도 반등 구간을 찾습니다.",
   },
   "daily-general-c": {
     title: "General-C Daily Operation",
     traderId: "arbitrage",
-    description: "상대가치/통계 기반으로 12개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
+    description: "상대가치/통계 기반으로 9개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
   },
   "daily-anomaly": {
     title: "General-D Daily Operation",
     traderId: "general-d",
-    description: "General-B 기반 박스권 재진입 전략으로 12개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
+    description: "General-B 기반 박스권 재진입 전략으로 9개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
   },
   "daily-general-e": {
     title: "General-E Daily Operation",
@@ -244,21 +244,23 @@ const dailyScreens: Record<
 export function App() {
   const [screenId, setScreenId] = useState<ScreenId>(() => loadStoredScreenId());
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
-  const [chartInterval, setChartInterval] = useState<ChartInterval>({ value: 5, unit: "minute" });
-  const [modalInterval, setModalInterval] = useState<ChartInterval>({ value: 5, unit: "minute" });
-  const [reportGuideMode, setReportGuideMode] = useState<GuideRuleMode>("strict");
-  const [reportAutoBlockMode, setReportAutoBlockMode] = useState<AutoBlockMode>("enabled");
+  const [chartInterval, setChartInterval] = useState<ChartInterval>({ value: 1, unit: "minute" });
+  const [modalInterval, setModalInterval] = useState<ChartInterval>({ value: 1, unit: "minute" });
+  const [reportGuideMode, setReportGuideMode] = useState<GuideRuleMode>("ignored");
+  const [reportAutoBlockMode, setReportAutoBlockMode] = useState<AutoBlockMode>("disabled");
   const [dailyGuideModes, setDailyGuideModes] = useState<Record<string, GuideRuleMode>>({
-    "daily-general-a": "strict",
-    "daily-general-b": "strict",
-    "daily-general-c": "strict",
-    "daily-anomaly": "strict",
+    "daily-general-a": "ignored",
+    "daily-general-b": "ignored",
+    "daily-general-c": "ignored",
+    "daily-anomaly": "ignored",
+    "daily-general-e": "ignored",
   });
   const [dailyAutoBlockModes, setDailyAutoBlockModes] = useState<Record<string, AutoBlockMode>>({
-    "daily-general-a": "enabled",
-    "daily-general-b": "enabled",
-    "daily-general-c": "enabled",
-    "daily-anomaly": "enabled",
+    "daily-general-a": "disabled",
+    "daily-general-b": "disabled",
+    "daily-general-c": "disabled",
+    "daily-anomaly": "disabled",
+    "daily-general-e": "disabled",
   });
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [marketData, setMarketData] = useState<DashboardMarketData>(() => loadSampleMarketData());
@@ -416,8 +418,8 @@ export function App() {
 
   const activeDailyScreen = isDailyScreenId(screenId) ? dailyScreens[screenId] : null;
   const isDailyScreen = activeDailyScreen !== null;
-  const activeDailyGuideMode = activeDailyScreen ? dailyGuideModes[screenId] ?? "strict" : reportGuideMode;
-  const activeDailyAutoBlockMode = activeDailyScreen ? dailyAutoBlockModes[screenId] ?? "enabled" : "enabled";
+  const activeDailyGuideMode = activeDailyScreen ? dailyGuideModes[screenId] ?? "ignored" : reportGuideMode;
+  const activeDailyAutoBlockMode = activeDailyScreen ? dailyAutoBlockModes[screenId] ?? "disabled" : "disabled";
   const activeComparisons = comparisonsByMode[activeDailyGuideMode];
   const activeOptimizationPlans = optimizationPlansByMode[activeDailyGuideMode];
   const ranked = activeComparisons.slice().sort((a, b) => b.bestResult.returnRate - a.bestResult.returnRate);
@@ -595,6 +597,7 @@ export function App() {
         {screenId === "report-summary" ? (
           <SummaryReport
             autoBlockMode={reportAutoBlockMode}
+            caseComparisonRows={dashboardResults?.caseComparisonRows}
             guideMode={reportGuideMode}
             guideModeComparisons={guideModeComparisons}
             marketData={marketData}
@@ -736,7 +739,7 @@ function GeneralScenarioBuilder({
         <div className="section-head">
           <div>
             <h3>General 시나리오 개요 및 구축</h3>
-            <p>A/B/C 일반 시나리오는 top 30 후보를 전략별로 최적화한 뒤 12개 감시 종목을 고르는 흐름입니다.</p>
+            <p>A/B/C/D/E 일반 시나리오는 top 30 후보를 전략별로 최적화한 뒤 수익률 상위 9개 감시 종목을 고르는 흐름입니다.</p>
           </div>
           <strong>Top 30 Monitoring</strong>
         </div>
@@ -796,7 +799,7 @@ function AnomalyScenarioBuilder({
             <h3>General-D 시나리오 개요 및 구축</h3>
             <p>General-D는 특정 종목을 추격하기보다 박스권, 눌림, 재진입 조건이 맞을 때만 거래하는 실험 전략입니다.</p>
           </div>
-          <strong>{plan?.selectedMarkets.length ?? 0}/12</strong>
+          <strong>{plan?.selectedMarkets.length ?? 0}/9</strong>
         </div>
         <div className="logic-grid">
           <InfoTile title="진입 조건" value="박스권 과매도 또는 상승 추세 중 눌림 구간에서만 매수 후보로 봅니다." />
@@ -853,6 +856,7 @@ function GuidelineOverview({
 
 function SummaryReport({
   autoBlockMode,
+  caseComparisonRows,
   guideMode,
   guideModeComparisons,
   marketData,
@@ -862,6 +866,7 @@ function SummaryReport({
   ranked,
 }: {
   autoBlockMode: AutoBlockMode;
+  caseComparisonRows?: CaseComparisonRow[];
   guideMode: GuideRuleMode;
   guideModeComparisons: StrategyGuideModeComparison[];
   marketData: DashboardMarketData;
@@ -889,7 +894,7 @@ function SummaryReport({
         </div>
         <ComparisonTable ranked={ranked} />
       </section>
-      <CaseComparisonView caseRows={buildCaseComparisonRows(guideModeComparisons, marketData.candlesByMarket)} />
+      <CaseComparisonView caseRows={caseComparisonRows ?? buildCaseComparisonRows(guideModeComparisons, marketData.candlesByMarket)} />
       <OptimizationSummary optimizationPlans={plans} />
     </>
   );
@@ -929,7 +934,7 @@ function GeneralReport({
         <div className="section-head">
           <div>
             <h3>General 시나리오 Report</h3>
-            <p>A/B/C 일반 전략의 수익률, 낙폭, 거래 수, 감시 종목을 비교합니다.</p>
+            <p>A/B/C/D/E 일반 전략의 수익률, 낙폭, 거래 수, 감시 종목을 비교합니다.</p>
           </div>
           <div className="operation-toggles">
             <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
@@ -962,7 +967,7 @@ function GeneralReport({
             <div className="section-head">
               <div>
                 <h3>{profile?.name ?? traderId}</h3>
-                <p>{profile?.summary ?? "General strategy report."} All 12 selected monitoring candidates are shown below.</p>
+                <p>{profile?.summary ?? "General strategy report."} All 9 selected monitoring candidates are shown below.</p>
               </div>
               <strong>{formatMarketName(comparison?.bestResult.market ?? "TBD")}</strong>
             </div>
@@ -1131,7 +1136,7 @@ function DailyOperationView({
       <section className="panel watch-panel">
         <div className="section-head">
           <div className="inline-title">
-            <h3>12개 Daily Operation 화면</h3>
+            <h3>9개 Daily Operation 화면</h3>
             <IntervalControls interval={chartInterval} onChange={onChartIntervalChange} label="Chart period" compact />
           </div>
           <div className="operation-panel-actions">
@@ -1179,7 +1184,7 @@ function DailyOperationView({
               </article>
             );
           })}
-          {entries.length === 0 ? <div className="empty-state">선택된 12개 감시 종목이 아직 없습니다.</div> : null}
+          {entries.length === 0 ? <div className="empty-state">선택된 9개 감시 종목이 아직 없습니다.</div> : null}
         </div>
       </section>
 
@@ -1477,9 +1482,9 @@ function OptimizationSummary({ optimizationPlans }: { optimizationPlans: TraderO
       <div className="section-head">
         <div>
           <h3>Monitoring Selection Summary</h3>
-          <p>각 전략은 후보 30개를 평가한 뒤 감시 대상 12개를 선택합니다.</p>
+          <p>각 전략은 후보 30개를 평가한 뒤 수익률 상위 감시 대상 9개를 선택합니다.</p>
         </div>
-        <strong>Monitor 30 -&gt; Display 12</strong>
+        <strong>Monitor 30 -&gt; Display 9</strong>
       </div>
       <div className="optimization-grid">
         {optimizationPlans.map((plan) => (
@@ -1978,7 +1983,7 @@ function IntervalControls({
           const preset = chartIntervalPresets.find((item) => item.value === event.target.value);
           if (preset) onChange(preset.interval);
         }}
-        value={selectedPreset?.value ?? "5m"}
+        value={selectedPreset?.value ?? "1m"}
       >
         {chartIntervalPresets.map((preset) => (
           <option key={preset.value} value={preset.value}>
@@ -2028,7 +2033,9 @@ function buildCaseComparisonRows(
       buildCaseMetric(comparison.ignored.bestResult, "enabled", candlesByMarket),
       buildCaseMetric(comparison.ignored.bestResult, "disabled", candlesByMarket),
     ];
-    const bestCase = cases.reduce((best, current) => (scoreCaseMetric(current) > scoreCaseMetric(best) ? current : best));
+    const bestCase = cases.reduce((best, current) =>
+      current.returnRate > best.returnRate ? current : best,
+    );
 
     return {
       bestCase,
@@ -2114,10 +2121,6 @@ function getEquityMaxDrawdown(equity: Array<{ value: number }>) {
     maxDrawdown = Math.max(maxDrawdown, peak === 0 ? 0 : (peak - point.value) / peak);
   }
   return maxDrawdown;
-}
-
-function scoreCaseMetric(metric: CaseMetric) {
-  return metric.returnRate - metric.maxDrawdown * 1.5 - metric.blocked * 0.0002;
 }
 
 function buildDailyEntries(

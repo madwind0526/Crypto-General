@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { runPaperTradingSimulation, PaperTradingSession, type PaperTradingResult } from "../src/simulation/paperTrading";
+import { PaperTradingSession, type PaperTradingResult } from "../src/simulation/paperTrading";
 import type { TraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { strategies } from "../src/strategies";
 import type { Candle, GuideRuleMode, SafetyMode, Strategy, TraderId } from "../src/types/trading";
@@ -145,11 +145,8 @@ async function loadPlans() {
 }
 
 function seedClosedCandles(cache: MarketCachePayload) {
-  const startAt = operationStartAt ?? 0;
   for (const market of selectedMarkets) {
-    closedCandles[market] = (cache.candlesByMarket[market] ?? [])
-      .filter((candle) => candle.timestamp >= startAt)
-      .slice(-maxCandles);
+    closedCandles[market] = (cache.candlesByMarket[market] ?? []).slice(-maxCandles);
   }
 }
 
@@ -180,10 +177,23 @@ function replaySession(
   guideRuleMode: GuideRuleMode,
   autoBlockMode: SafetyMode,
 ) {
-  const result = runPaperTradingSimulation(strategy, plan, closedCandles, { guideRuleMode, autoBlockMode, maxCandles });
-  for (const timestamp of result.decisions.map((decision) => decision.timestamp)) {
+  void strategy;
+  void guideRuleMode;
+  void autoBlockMode;
+  const selectedCandles = plan.selectedMarkets.map((item) => closedCandles[item.market] ?? []);
+  for (const timestamp of getSimulationTimestamps(selectedCandles)
+    .filter((candidate) => operationStartAt === undefined || candidate >= operationStartAt)
+    .slice(-maxCandles)) {
     session.step(timestamp, closedCandles);
   }
+}
+
+function getSimulationTimestamps(candleSets: Candle[][]) {
+  const timestamps = new Set<number>();
+  for (const candles of candleSets) {
+    for (const candle of candles) timestamps.add(candle.timestamp);
+  }
+  return [...timestamps].sort((a, b) => a - b);
 }
 
 function connect() {
@@ -257,6 +267,7 @@ function stepWsOIntraminute(market: string, executionPrice: number, timestamp: n
   if (!virtual) return;
   const candlesByMarket = withVirtualCandle(market, virtual);
   const signalMarkets = new Set([market]);
+  const riskMarkets = new Set([market]);
   const executionPrices = new Map([[market, executionPrice]]);
   const minuteTimestamp = virtual.timestamp;
 
@@ -264,11 +275,16 @@ function stepWsOIntraminute(market: string, executionPrice: number, timestamp: n
     for (const autoBlockMode of safetyModes) {
       for (const strategy of strategies) {
         const key = sessionMinuteKey(guideRuleMode, autoBlockMode, strategy.id, minuteTimestamp);
-        if (intraminuteTradeLocks.has(key)) continue;
         const session = sessions.wsO[guideRuleMode][autoBlockMode][strategy.id];
         if (!session) continue;
-        const decision = session.step(timestamp, candlesByMarket, { signalMarkets, executionPrices });
-        if (decision.action !== "hold") intraminuteTradeLocks.add(key);
+        const locked = intraminuteTradeLocks.has(key);
+        const tradeCountBefore = session.getTradeCount();
+        const decision = session.step(timestamp, candlesByMarket, {
+          executionPrices,
+          riskMarkets,
+          signalMarkets: locked ? new Set() : signalMarkets,
+        });
+        if (decision.action !== "hold" || session.getTradeCount() > tradeCountBefore) intraminuteTradeLocks.add(key);
       }
     }
   }

@@ -19,7 +19,10 @@ function candle(close: number, index: number): Candle {
 describe("averageDropCycleStrategy", () => {
   it("builds the requested minute/percent parameter split", () => {
     expect(averageDropCycleScenarios).toHaveLength(4 * 5 * 6 * 5);
+    expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 5)).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 10)).toBe(true);
+    expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 60)).toBe(true);
+    expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 3)).toBe(false);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 2)).toBe(false);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.entryDropPct === 0.05)).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.avgStopPct === 0)).toBe(true);
@@ -29,14 +32,14 @@ describe("averageDropCycleStrategy", () => {
   it("buys after a drop from average and sells after price rebounds above average", () => {
     const scenario = averageDropCycleScenarios.find(
       (item) =>
-        item.params.averageWindowCandles === 3 &&
+        item.params.averageWindowCandles === 5 &&
         item.params.entryDropPct === 0.01 &&
         item.params.avgStopPct === 0.05 &&
         item.params.avgTakeProfitPct === 0.01,
     );
     expect(scenario).toBeDefined();
 
-    const candles = [100, 100, 100, 96, 96, 101, 102].map(candle);
+    const candles = [100, 100, 100, 100, 100, 96, 96, 101, 102].map(candle);
     const result = runBacktest(averageDropCycleStrategy, scenario!, candles, {
       initialCash: 1_000_000,
       feeRate: 0,

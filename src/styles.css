@@ -705,15 +705,17 @@ h4 {
 }
 
 .watch-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(8px, 0.75vw, 14px);
 }
 
 .symbol-card {
   display: grid;
-  grid-template-rows: auto auto minmax(150px, 1fr);
-  gap: 11px;
-  min-height: 238px;
-  padding: 14px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: clamp(6px, 0.55vw, 11px);
+  min-height: clamp(208px, calc((100vh - 410px) / 3), 306px);
+  padding: clamp(9px, 0.8vw, 14px);
+  font-size: clamp(0.74rem, 0.58rem + 0.24vw, 0.94rem);
   cursor: pointer;
   transition:
     border-color 150ms ease,
@@ -731,13 +733,22 @@ h4 {
   min-width: 0;
 }
 
+.symbol-card-head strong {
+  font-size: clamp(0.9rem, 0.7rem + 0.28vw, 1.1rem);
+}
+
+.symbol-card-head span {
+  font-size: clamp(0.7rem, 0.58rem + 0.18vw, 0.88rem);
+}
+
 .symbol-meta {
   align-items: center;
+  min-height: 28px;
 }
 
 .symbol-meta strong {
   color: var(--accent-text);
-  font-size: 0.72rem;
+  font-size: clamp(0.62rem, 0.48rem + 0.22vw, 0.78rem);
   text-align: right;
   white-space: normal;
 }
@@ -831,7 +842,8 @@ h4 {
 }
 
 .market-chart--mini {
-  height: 160px;
+  height: clamp(132px, calc((100vh - 540px) / 3), 230px);
+  min-height: 132px;
 }
 
 .market-chart--large {
@@ -875,7 +887,7 @@ h4 {
   border-radius: 6px;
   background: var(--tooltip-bg);
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: clamp(0.56rem, 0.48rem + 0.14vw, 0.68rem);
   line-height: 1.2;
   pointer-events: none;
   text-align: center;
@@ -1110,6 +1122,14 @@ h4 {
   .trend-legend-groups,
   .optimization-grid {
     grid-template-columns: 1fr;
+  }
+
+  .symbol-card {
+    min-height: 252px;
+  }
+
+  .market-chart--mini {
+    height: 178px;
   }
 
   .chart-modal-backdrop {

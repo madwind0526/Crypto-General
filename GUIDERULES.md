@@ -13,9 +13,9 @@ Comparing strict versus ignored mode is required before selecting a trader for r
 
 ## Trader Operation Model
 
-### A/B/C Traders
+### General Traders A/B/C/D/E
 
-A, B, and C are normal strategy traders such as momentum, mean reversion, and statistical/relative-value traders.
+General-A through General-E are normal strategy traders such as momentum, mean reversion, statistical/relative-value, re-entry, and average-drop cycle traders.
 
 #### One-Time Or Update Run
 
@@ -29,18 +29,18 @@ A, B, and C are normal strategy traders such as momentum, mean reversion, and st
    - Result: 30 markets, each with its own best scenario parameters.
 
 3. Select monitoring coins.
-   - Rank the 30 markets by profit rate and risk-adjusted quality.
-   - Select 12 markets for monitoring.
-   - Result: 12 markets, each with market-specific scenario parameters.
+   - Rank the 30 markets by pure profit rate, using risk-adjusted quality only as a tie-breaker.
+   - Select 9 markets for monitoring and display them as a 3x3 board.
+   - Result: 9 markets, each with market-specific scenario parameters.
 
 #### Daily Operation
 
-1. Every morning, load the 12 selected markets and their 12 market-specific parameter sets.
-2. Check buy signals across the 12 markets.
+1. Every morning, load the 9 selected markets and their market-specific parameter sets.
+2. Check buy signals across the 9 markets.
 3. If one market has a buy signal, enter that market.
 4. While holding, monitor that market for sell timing.
 5. If a sell signal appears, exit.
-6. Resume scanning all 12 markets for the next buy signal.
+6. Resume scanning all 9 markets for the next buy signal.
 7. If two or more buy signals appear at the same time, choose the stronger signal or the higher-quality market.
 8. If a better buy signal appears while already holding another market, compare:
    - current position expected return
@@ -52,7 +52,7 @@ A, B, and C are normal strategy traders such as momentum, mean reversion, and st
 
 #### Trader Selection
 
-After a fixed period, compare A/B/C profit rate, drawdown, win rate, turnover, and stability.
+After a fixed period, compare General-A/B/C/D/E profit rate, drawdown, win rate, turnover, and stability.
 
 The best trader can be selected by:
 
@@ -60,17 +60,11 @@ The best trader can be selected by:
 - forward paper simulation
 - a hybrid process: optimize on history, then validate for the next week in simulation
 
-### D Trader
+### Separate Anomaly Project
 
-D is the anomaly signal trader. It should not use the same flow as A/B/C.
+The older D anomaly slot was replaced in this project by General-D. Anomaly operation now lives in the separate `C:\Claude\Crypto-Anomaly` project and should not be mixed into the General-A/B/C/D/E workflow here.
 
-#### One-Time Or Update Run
-
-1. Use the previous 90 days of trading history to find markets that showed abnormal signals.
-2. Analyze the features of markets that showed abnormal behavior.
-3. Scan all markets and select markets that share those features. This candidate set may be larger than 12.
-
-The D trader must explicitly define:
+The separate anomaly project must explicitly define:
 
 - what counts as an abnormal signal
 - how often abnormal signals occur
@@ -80,15 +74,7 @@ The D trader must explicitly define:
 - what to do if buy happened but sell timing was missed
 - what to do if the signal fails immediately after entry
 
-#### Daily Operation
-
-1. Use recent trend and the abnormal-candidate universe to select 12 markets likely to show abnormal signals today.
-2. Monitor only those 12 markets at 1-minute resolution.
-3. If an abnormal signal appears, make a buy/sell decision.
-4. After the trade ends, resume monitoring the 12 markets.
-5. Normal 1-minute monitoring data should be compressed to 5-minute or 10-minute candles after use.
-6. Keep only the latest 90 days of compressed history.
-7. Keep raw 1-minute data only around meaningful event windows.
+Anomaly-specific lookback windows, candidate counts, retention rules, and daily monitoring behavior should be maintained in `C:\Claude\Crypto-Anomaly`, not in this General strategy project's operating model.
 
 ## Dow Theory Rules
 

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTraderOptimizationPlan,
+  compareOptimizationsByPureReturn,
   selectTopMarketsByTradeValue,
 } from "../src/simulation/traderOptimization";
+import type { MarketScenarioOptimization } from "../src/simulation/traderOptimization";
 import type { Candle, Strategy } from "../src/types/trading";
 
 const testStrategy: Strategy = {
@@ -67,7 +69,7 @@ describe("trader optimization", () => {
     expect(selected.map((market) => market.market)).toEqual(["KRW-HIGH", "KRW-MID"]);
   });
 
-  it("optimizes each candidate market and selects monitoring markets by score", () => {
+  it("optimizes each candidate market and selects monitoring markets by return", () => {
     const plan = buildTraderOptimizationPlan(
       testStrategy,
       {
@@ -90,7 +92,44 @@ describe("trader optimization", () => {
     expect(plan.selectedMarkets[0].market).toBe("KRW-UP");
     expect(plan.selectedMarkets.map((market) => market.bestResult.scenarioId)).toContain("active");
   });
+
+  it("orders optimization rows by pure return before risk score", () => {
+    const highReturnLowScore = createOptimizationRow("KRW-HIGH-RETURN", 0.1, -1);
+    const lowerReturnHighScore = createOptimizationRow("KRW-HIGH-SCORE", 0.05, 10);
+
+    expect([lowerReturnHighScore, highReturnLowScore].sort(compareOptimizationsByPureReturn)[0].market).toBe(
+      "KRW-HIGH-RETURN",
+    );
+  });
 });
+
+function createOptimizationRow(market: string, returnRate: number, score: number): MarketScenarioOptimization {
+  return {
+    market,
+    candidateRank: 1,
+    tradeValue: 1_000,
+    score,
+    bestResult: {
+      strategyId: "momentum",
+      scenarioId: "test",
+      scenarioName: "Test",
+      scenarioParams: {},
+      market,
+      finalValue: 1_000_000 * (1 + returnRate),
+      returnRate,
+      maxDrawdown: 0.5,
+      winRate: 0,
+      tradeCount: 1,
+      profitFactor: 0,
+      worstTradeReturn: 0,
+      guideRuleMode: "ignored",
+      guideRejectedSignals: 0,
+      trades: [],
+      signalAudit: [],
+      equityCurve: [],
+    },
+  };
+}
 
 function createCandles(
   market: string,

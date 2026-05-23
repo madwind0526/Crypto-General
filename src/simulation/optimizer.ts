@@ -20,22 +20,22 @@ export function compareStrategies(
   marketCandles: Record<string, Candle[]>,
   config?: BacktestConfig,
 ): StrategyComparison[] {
-  return strategies.map((strategy) => {
+  return strategies.flatMap((strategy) => {
     const scenarios = strategy.scenarios?.length ? strategy.scenarios : [strategy.defaultScenario];
-    const results = Object.values(marketCandles)
-      .filter((candles) => candles.length > 60)
+    const validMarketCandles = Object.values(marketCandles).filter((candles) => candles.length > 60);
+    const results = validMarketCandles
       .flatMap((candles) => scenarios.map((scenario) => runBacktest(strategy, scenario, candles, config)));
 
-    const bestResult = results.reduce((best, current) => {
-      const currentScore = scoreResult(current);
-      const bestScore = scoreResult(best);
-      return currentScore > bestScore ? current : best;
-    });
+    if (results.length === 0) return [];
+
+    const bestResult = results.reduce((best, current) =>
+      compareByPureReturn(current, best) > 0 ? current : best,
+    );
 
     return {
       strategyName: strategy.name,
       bestResult,
-      testedMarkets: Object.values(marketCandles).filter((candles) => candles.length > 60).length,
+      testedMarkets: validMarketCandles.length,
       testedScenarios: scenarios.length,
     };
   });
@@ -56,11 +56,11 @@ export function compareStrategiesByGuideMode(
     guideRuleMode: "strict",
   });
 
-  return strategies.map((strategy) => {
+  return strategies.flatMap((strategy) => {
     const ignoredComparison = ignored.find((comparison) => comparison.bestResult.strategyId === strategy.id);
     const strictComparison = strict.find((comparison) => comparison.bestResult.strategyId === strategy.id);
     if (!ignoredComparison || !strictComparison) {
-      throw new Error(`Missing guide-mode comparison for ${strategy.id}`);
+      return [];
     }
 
     return {
@@ -68,7 +68,7 @@ export function compareStrategiesByGuideMode(
       ignored: ignoredComparison,
       strict: strictComparison,
       bestMode:
-        scoreBacktestResult(strictComparison.bestResult) >= scoreBacktestResult(ignoredComparison.bestResult)
+        compareByPureReturn(strictComparison.bestResult, ignoredComparison.bestResult) >= 0
           ? "strict"
           : "ignored",
     };
@@ -81,4 +81,6 @@ export function scoreBacktestResult(result: BacktestResult): number {
   return result.returnRate - drawdownPenalty + result.winRate * 0.05 - activityPenalty;
 }
 
-const scoreResult = scoreBacktestResult;
+function compareByPureReturn(current: BacktestResult, best: BacktestResult) {
+  return current.returnRate - best.returnRate || best.maxDrawdown - current.maxDrawdown || current.tradeCount - best.tradeCount;
+}

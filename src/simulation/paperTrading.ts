@@ -19,6 +19,7 @@ export interface PaperTradingOptions {
   autoBlockMode: SafetyMode;
   guideRuleMode: GuideRuleMode;
   maxCandles: number;
+  startAt: number | null;
   config: BacktestConfig;
 }
 
@@ -53,6 +54,7 @@ export interface PaperTradingResult {
 
 export interface PaperTradingStepOptions {
   executionPrices?: Map<string, number>;
+  riskMarkets?: Set<string>;
   signalMarkets?: Set<string>;
 }
 
@@ -60,6 +62,7 @@ const defaultOptions: PaperTradingOptions = {
   autoBlockMode: "disabled",
   guideRuleMode: "strict",
   maxCandles: 288,
+  startAt: null,
   config: defaultBacktestConfig,
 };
 
@@ -115,10 +118,12 @@ export class PaperTradingSession {
       candlesAtTime.set(selected.market, { candle, candleIndex });
     }
 
-    this.updateOpenPosition(candlesAtTime);
+    const riskExitedMarkets = this.updateOpenPosition(candlesAtTime, timestamp, options.riskMarkets);
 
-    for (const selected of this.selectedMarkets) {
+    if (riskExitedMarkets.size === 0) {
+      for (const selected of this.selectedMarkets) {
       if (options.signalMarkets && !options.signalMarkets.has(selected.market)) continue;
+      if (riskExitedMarkets.has(selected.market)) continue;
       const candleInfo = candlesAtTime.get(selected.market);
       if (!candleInfo) continue;
 
@@ -143,11 +148,10 @@ export class PaperTradingSession {
         decision,
         mode: this.guideRuleMode,
       });
-      let finalAction =
-        decision.action === "buy" && this.guideRuleMode === "strict" && !guideRuleEvaluation.passed
-          ? "hold"
-          : decision.action;
-      if (decision.action === "buy" && finalAction === "hold" && this.guideRuleMode === "strict" && !guideRuleEvaluation.passed) {
+      let finalAction = decision.action;
+      const guideBlocked = decision.action === "buy" && this.guideRuleMode === "strict" && !guideRuleEvaluation.passed;
+      if (guideBlocked) {
+        finalAction = "hold";
         this.blockedSignals.push({
           market: selected.market,
           timestamp,
@@ -157,7 +161,7 @@ export class PaperTradingSession {
           safetyMode: this.autoBlockMode,
         });
       }
-      if (finalAction === "buy" && this.autoBlockMode === "enabled") {
+      if (decision.action === "buy" && !guideBlocked && this.autoBlockMode === "enabled") {
         const candlesUntilDecision = candles.slice(0, candleIndex + 1);
         const currentReturn = getDailyReturnAtCandleIndex(candles, candleIndex);
         const safetyEvaluation = evaluateSafetyBlock(selected.bestResult, candlesUntilDecision, currentReturn);
@@ -185,6 +189,7 @@ export class PaperTradingSession {
           timestamp,
           reasonCodes: [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         });
+      }
       }
     }
 
@@ -303,15 +308,65 @@ export class PaperTradingSession {
     };
   }
 
-  private updateOpenPosition(candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>) {
-    if (!this.position) return;
+  getTradeCount() {
+    return this.trades.length;
+  }
+
+  getPositionMarket() {
+    return this.position?.market ?? null;
+  }
+
+  private updateOpenPosition(
+    candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>,
+    timestamp: number,
+    riskMarkets?: Set<string>,
+  ) {
+    const riskExitedMarkets = new Set<string>();
+    if (!this.position) return riskExitedMarkets;
+    if (riskMarkets && !riskMarkets.has(this.position.market)) return riskExitedMarkets;
     const candle = candlesAtTime.get(this.position.market)?.candle;
-    if (!candle) return;
-    this.position.highestPrice = Math.max(this.position.highestPrice, candle.high);
+    if (!candle) return riskExitedMarkets;
+    const previousHighestPrice = this.position.highestPrice;
     if (this.lastPositionCandleTimestamp !== candle.timestamp) {
       this.position.holdCandles += 1;
       this.lastPositionCandleTimestamp = candle.timestamp;
     }
+
+    const scenario = this.getScenarioForMarket(this.position.market);
+    const stopLossPct = scenario?.params.stopLossPct ?? scenario?.params.emergencyStopPct ?? 0;
+    const trailingStopPct = scenario?.params.trailingStopPct ?? 0;
+    const takeProfitPct = scenario?.params.takeProfitPct ?? 0;
+    const stopPrice = this.position.averagePrice * (1 - stopLossPct);
+    const trailingStop = previousHighestPrice * (1 - trailingStopPct);
+    const takeProfit = this.position.averagePrice * (1 + takeProfitPct);
+    const triggeredStops = [
+      stopLossPct > 0 && candle.low <= stopPrice ? stopPrice : null,
+      trailingStopPct > 0 && candle.low <= trailingStop ? trailingStop : null,
+    ].filter((price): price is number => price !== null);
+    const takeProfitTriggered = takeProfitPct > 0 && candle.high >= takeProfit;
+
+    if (triggeredStops.length > 0 || takeProfitTriggered) {
+      const exitedMarket = this.position.market;
+      const exitBasePrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
+      const exitPrice = exitBasePrice * (1 - this.config.slippageRate);
+      this.cash += this.closePosition(this.position, exitPrice, timestamp, ["risk-rule-exit"]);
+      this.lastSellPriceByMarket.set(exitedMarket, exitPrice);
+      riskExitedMarkets.add(exitedMarket);
+      this.position = null;
+      this.lastPositionCandleTimestamp = null;
+    }
+
+    if (this.position) {
+      this.position.highestPrice = Math.max(this.position.highestPrice, candle.high);
+    }
+
+    return riskExitedMarkets;
+  }
+
+  private getScenarioForMarket(market: string) {
+    const selected = this.selectedMarkets.find((item) => item.market === market);
+    if (!selected) return null;
+    return this.scenarioById.get(selected.bestResult.scenarioId) ?? this.strategy.defaultScenario;
   }
 
   private getPortfolioValue(candlesAtTime: Map<string, { candle: Candle; candleIndex: number }>) {
@@ -349,9 +404,9 @@ export function runPaperTradingSimulation(
 ): PaperTradingResult {
   const resolved = resolveOptions(options);
   const selectedMarkets = plan.selectedMarkets.filter((item) => (candlesByMarket[item.market] ?? []).length > 0);
-  const timestamps = getSimulationTimestamps(selectedMarkets.map((item) => candlesByMarket[item.market] ?? [])).slice(
-    -resolved.maxCandles,
-  );
+  const timestamps = getSimulationTimestamps(selectedMarkets.map((item) => candlesByMarket[item.market] ?? []))
+    .filter((timestamp) => resolved.startAt === null || timestamp >= resolved.startAt)
+    .slice(-resolved.maxCandles);
   const session = new PaperTradingSession(strategy, plan, resolved);
 
   for (const timestamp of timestamps) {

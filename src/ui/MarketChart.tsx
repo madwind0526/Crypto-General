@@ -56,6 +56,7 @@ export function MarketChart({
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markerSeriesRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const boundaryPrimitiveRef = useRef<DailyBoundaryPrimitive | null>(null);
+  const blockedSignalPrimitiveRef = useRef<BlockedSignalPrimitive | null>(null);
   const candlesByTimeRef = useRef<Map<Time, Candle>>(new Map());
   const [measurementPoints, setMeasurementPoints] = useState<MeasurementPoints>({ p1: null, p2: null });
   const normalizedInterval = useMemo(() => normalizeChartInterval(interval), [interval]);
@@ -92,12 +93,13 @@ export function MarketChart({
     if (!container) return;
 
     const colors = getChartColors(themeMode);
+    const responsiveOptions = getResponsiveChartOptions(container.clientWidth, variant);
     const chart = createChart(container, {
       autoSize: true,
       layout: {
         background: { color: "transparent" },
         textColor: colors.text,
-        fontSize: variant === "mini" ? 10 : 12,
+        fontSize: responsiveOptions.fontSize,
       },
       localization: {
         timeFormatter: formatChartTimeLabel,
@@ -109,7 +111,7 @@ export function MarketChart({
       rightPriceScale: {
         borderVisible: false,
         entireTextOnly: true,
-        minimumWidth: variant === "large" ? 92 : 64,
+        minimumWidth: responsiveOptions.priceScaleWidth,
         scaleMargins: {
           top: 0.08,
           bottom: 0.32,
@@ -174,6 +176,9 @@ export function MarketChart({
     const boundaryPrimitive = new DailyBoundaryPrimitive(themeMode, variant);
     candleSeries.attachPrimitive(boundaryPrimitive);
     boundaryPrimitiveRef.current = boundaryPrimitive;
+    const blockedSignalPrimitive = new BlockedSignalPrimitive(themeMode, variant);
+    candleSeries.attachPrimitive(blockedSignalPrimitive);
+    blockedSignalPrimitiveRef.current = blockedSignalPrimitive;
 
     chart.subscribeCrosshairMove((param) => {
       const tooltip = tooltipRef.current;
@@ -223,14 +228,36 @@ export function MarketChart({
 
     return () => {
       candleSeries.detachPrimitive(boundaryPrimitive);
+      candleSeries.detachPrimitive(blockedSignalPrimitive);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       markerSeriesRef.current = null;
       boundaryPrimitiveRef.current = null;
+      blockedSignalPrimitiveRef.current = null;
     };
   }, [themeMode, variant]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+
+    const applyResponsiveOptions = () => {
+      const { fontSize, priceScaleWidth } = getResponsiveChartOptions(container.clientWidth, variant);
+      chart.applyOptions({
+        layout: { fontSize },
+        rightPriceScale: { minimumWidth: priceScaleWidth },
+      });
+    };
+
+    applyResponsiveOptions();
+    const observer = new ResizeObserver(applyResponsiveOptions);
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [variant]);
 
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
@@ -259,7 +286,8 @@ export function MarketChart({
 
     chart.timeScale().fitContent();
     boundaryPrimitiveRef.current?.update(getBoundaryChartTime(boundaryTimestamp, visibleCandles), themeMode, variant);
-  }, [boundaryTimestamp, themeMode, visibleCandles]);
+    blockedSignalPrimitiveRef.current?.update(blockedSignals, visibleCandles, themeMode, variant);
+  }, [blockedSignals, boundaryTimestamp, themeMode, variant, visibleCandles]);
 
   useEffect(() => {
     const markerSeries = markerSeriesRef.current;
@@ -268,10 +296,9 @@ export function MarketChart({
     const visibleTimes = new Set(visibleCandles.map((candle) => candle.timestamp));
     markerSeries.setMarkers([
       ...createTradeMarkers(trades, visibleCandles, themeMode, variant),
-      ...createBlockedSignalMarkers(blockedSignals, visibleCandles, themeMode, variant),
       ...(variant === "large" ? createMeasurementMarkers(measurementPoints, visibleTimes, themeMode) : []),
     ]);
-  }, [blockedSignals, measurementPoints, themeMode, trades, variant, visibleCandles]);
+  }, [measurementPoints, themeMode, trades, variant, visibleCandles]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     if (candles.length <= visibleCandles.length) return;
@@ -433,36 +460,6 @@ function createTradeMarkers(
   return markers;
 }
 
-function createBlockedSignalMarkers(
-  blockedSignals: BlockedSignal[],
-  visibleCandles: Candle[],
-  themeMode: "light" | "dark",
-  variant: "mini" | "large",
-): SeriesMarker<Time>[] {
-  if (blockedSignals.length === 0 || visibleCandles.length === 0) return [];
-
-  const guideColor = themeMode === "dark" ? "#63d7ff" : "#007db0";
-  const safetyColor = themeMode === "dark" ? "#ff5a6a" : "#c51f35";
-  const markerSize = variant === "large" ? 2.1 : 1.6;
-  const markers: SeriesMarker<Time>[] = [];
-
-  for (const signal of blockedSignals.slice().sort((a, b) => a.timestamp - b.timestamp)) {
-    const markerCandle = findVisibleCandleForTrade(visibleCandles, signal.timestamp);
-    if (!markerCandle) continue;
-
-    markers.push({
-      time: toChartTime(markerCandle.timestamp),
-      position: "aboveBar",
-      shape: "square",
-      color: signal.reason === "guide-rule" ? guideColor : safetyColor,
-      text: "X",
-      size: markerSize,
-    });
-  }
-
-  return markers;
-}
-
 function findVisibleCandleForTrade(visibleCandles: Candle[], timestamp: number) {
   let selected: Candle | null = null;
   for (const candle of visibleCandles) {
@@ -496,6 +493,141 @@ function findNearestCandleTimestamp(candles: Candle[], timestamp: number) {
   }
 
   return nearest;
+}
+
+interface BlockedSignalDrawingPoint {
+  color: string;
+  x: number;
+  y: number;
+}
+
+class BlockedSignalPrimitive implements ISeriesPrimitive<Time> {
+  private chart: IChartApi | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
+  private readonly view = new BlockedSignalView();
+
+  constructor(themeMode: "light" | "dark", variant: "mini" | "large") {
+    this.view.update([], [], themeMode, variant);
+  }
+
+  attached(param: SeriesAttachedParameter<Time, "Candlestick">) {
+    this.chart = param.chart as IChartApi;
+    this.series = param.series as ISeriesApi<"Candlestick">;
+    this.requestUpdate = param.requestUpdate;
+    this.view.setChart(this.chart, this.series);
+  }
+
+  detached() {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+    this.view.setChart(null, null);
+  }
+
+  paneViews() {
+    return [this.view];
+  }
+
+  update(
+    signals: BlockedSignal[],
+    visibleCandles: Candle[],
+    themeMode: "light" | "dark",
+    variant: "mini" | "large",
+  ) {
+    this.view.update(signals, visibleCandles, themeMode, variant);
+    this.requestUpdate?.();
+  }
+}
+
+class BlockedSignalView implements IPrimitivePaneView {
+  private chart: IChartApi | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
+  private signals: BlockedSignal[] = [];
+  private visibleCandles: Candle[] = [];
+  private themeMode: "light" | "dark" = "dark";
+  private variant: "mini" | "large" = "mini";
+
+  setChart(chart: IChartApi | null, series: ISeriesApi<"Candlestick"> | null) {
+    this.chart = chart;
+    this.series = series;
+  }
+
+  update(
+    signals: BlockedSignal[],
+    visibleCandles: Candle[],
+    themeMode: "light" | "dark",
+    variant: "mini" | "large",
+  ) {
+    this.signals = signals.slice().sort((a, b) => a.timestamp - b.timestamp);
+    this.visibleCandles = visibleCandles;
+    this.themeMode = themeMode;
+    this.variant = variant;
+  }
+
+  zOrder() {
+    return "top" as const;
+  }
+
+  renderer() {
+    if (!this.chart || !this.series || this.signals.length === 0 || this.visibleCandles.length === 0) return null;
+
+    const points: BlockedSignalDrawingPoint[] = [];
+    const size = this.variant === "large" ? 6.5 : 4.5;
+    for (const signal of this.signals) {
+      const candle = findVisibleCandleForTrade(this.visibleCandles, signal.timestamp);
+      if (!candle) continue;
+      const x = this.chart.timeScale().timeToCoordinate(toChartTime(candle.timestamp));
+      const y = this.series.priceToCoordinate(candle.high);
+      if (x === null || y === null) continue;
+      points.push({
+        color: getBlockedSignalColor(signal, this.themeMode),
+        x,
+        y: Math.max(size + 3, y - size * 1.45),
+      });
+    }
+
+    return points.length > 0 ? new BlockedSignalRenderer(points, size, this.variant) : null;
+  }
+}
+
+class BlockedSignalRenderer implements IPrimitivePaneRenderer {
+  constructor(
+    private readonly points: BlockedSignalDrawingPoint[],
+    private readonly size: number,
+    private readonly variant: "mini" | "large",
+  ) {}
+
+  draw(target: Parameters<IPrimitivePaneRenderer["draw"]>[0]) {
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      context.save();
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.lineWidth = this.variant === "large" ? 2 : 1.5;
+
+      for (const point of this.points) {
+        if (point.x < -this.size || point.x > mediaSize.width + this.size) continue;
+        if (point.y < -this.size || point.y > mediaSize.height + this.size) continue;
+
+        context.strokeStyle = point.color;
+        context.shadowColor = point.color;
+        context.shadowBlur = this.variant === "large" ? 4 : 2.5;
+        context.beginPath();
+        context.moveTo(point.x - this.size, point.y - this.size);
+        context.lineTo(point.x + this.size, point.y + this.size);
+        context.moveTo(point.x + this.size, point.y - this.size);
+        context.lineTo(point.x - this.size, point.y + this.size);
+        context.stroke();
+      }
+
+      context.restore();
+    });
+  }
+}
+
+function getBlockedSignalColor(signal: BlockedSignal, themeMode: "light" | "dark") {
+  if (signal.reason === "safety") return themeMode === "dark" ? "#ff4f7b" : "#c51f4a";
+  return themeMode === "dark" ? "#63d7ff" : "#007db0";
 }
 
 class DailyBoundaryPrimitive implements ISeriesPrimitive<Time> {
@@ -721,4 +853,23 @@ function getChartColors(themeMode: "light" | "dark") {
     volumeUp: "rgba(22, 128, 90, 0.34)",
     volumeDown: "rgba(196, 78, 78, 0.32)",
   };
+}
+
+function getResponsiveChartOptions(width: number, variant: "mini" | "large") {
+  if (variant === "large") {
+    return {
+      fontSize: clampNumber(Math.round(width / 92), 11, 14),
+      priceScaleWidth: clampNumber(Math.round(width / 15), 84, 112),
+    };
+  }
+
+  return {
+    fontSize: clampNumber(Math.round(width / 38), 8, 12),
+    priceScaleWidth: clampNumber(Math.round(width / 7), 48, 70),
+  };
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }

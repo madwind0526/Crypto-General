@@ -65,7 +65,7 @@ export const averageDropCycleStrategy: Strategy = {
 
 function buildAverageDropCycleScenarios() {
   const scenarios: StrategyScenario[] = [];
-  const averageWindows = [1, 3, 5, 10];
+  const averageWindows = [5, 10, 30, 60];
 
   for (const averageWindowCandles of averageWindows) {
     for (let entryDropPct = 1; entryDropPct <= 5; entryDropPct += 1) {
@@ -127,6 +127,12 @@ function getAverageTradePrices(candles: Candle[], windowCandles: number) {
   let closeSum = 0;
 
   for (let index = 0; index < candles.length; index += 1) {
+    if (index < window) {
+      averages.push(null);
+    } else {
+      averages.push(volumeSum > 0 && quoteVolumeSum > 0 ? quoteVolumeSum / volumeSum : closeSum / window);
+    }
+
     const current = candles[index];
     volumeSum += current.volume;
     quoteVolumeSum += current.quoteVolume;
@@ -138,13 +144,6 @@ function getAverageTradePrices(candles: Candle[], windowCandles: number) {
       quoteVolumeSum -= removed.quoteVolume;
       closeSum -= removed.close;
     }
-
-    if (index + 1 < window) {
-      averages.push(null);
-      continue;
-    }
-
-    averages.push(volumeSum > 0 && quoteVolumeSum > 0 ? quoteVolumeSum / volumeSum : closeSum / window);
   }
 
   byWindow.set(key, averages);

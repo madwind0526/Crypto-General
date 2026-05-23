@@ -14,11 +14,28 @@ export interface DashboardMarketData {
 
 export interface DashboardResults {
   generatedAt: string;
+  caseComparisonRows?: DashboardCaseComparisonRow[];
   comparisons: StrategyComparison[];
   comparisonsByGuideMode?: Record<"strict" | "ignored", StrategyComparison[]>;
   guideModeComparisons: StrategyGuideModeComparison[];
   optimizationPlans: TraderOptimizationPlan[];
   optimizationPlansByGuideMode?: Record<"strict" | "ignored", TraderOptimizationPlan[]>;
+}
+
+export interface DashboardCaseMetric {
+  autoBlockMode: SafetyMode;
+  blocked: number;
+  guideMode: GuideRuleMode;
+  label: string;
+  maxDrawdown: number;
+  returnRate: number;
+  trades: number;
+}
+
+export interface DashboardCaseComparisonRow {
+  bestCase: DashboardCaseMetric;
+  cases: DashboardCaseMetric[];
+  strategyName: string;
 }
 
 export interface DailyPaperResult {

@@ -31,6 +31,12 @@ interface MovingAverageEvaluation {
   longSlopeUp: boolean;
 }
 
+interface MovingAverageSeries {
+  short: Array<number | null>;
+  medium: Array<number | null>;
+  long: Array<number | null>;
+}
+
 interface SupportResistanceEvaluation {
   nearSupport: boolean;
   nearResistance: boolean;
@@ -44,6 +50,7 @@ interface CandleWarningEvaluation {
 }
 
 const MIN_LOOKBACK = 80;
+const movingAverageCache = new WeakMap<Candle[], Map<string, MovingAverageSeries>>();
 
 export function evaluateGuideRules({
   candleIndex,
@@ -163,10 +170,7 @@ export function evaluateDowTheory(candles: Candle[], candleIndex: number): DowTh
 }
 
 export function evaluateMovingAverages(candles: Candle[], candleIndex: number): MovingAverageEvaluation {
-  const closes = candles.map((candle) => candle.close);
-  const short = ema(closes, 10);
-  const medium = ema(closes, 50);
-  const long = ema(closes, 100);
+  const { short, medium, long } = getMovingAverageSeries(candles);
   const shortValue = short[candleIndex];
   const mediumValue = medium[candleIndex];
   const longValue = long[candleIndex];
@@ -207,6 +211,27 @@ export function evaluateMovingAverages(candles: Candle[], candleIndex: number): 
     mediumSlopeUp,
     longSlopeUp,
   };
+}
+
+function getMovingAverageSeries(candles: Candle[]): MovingAverageSeries {
+  let byWindow = movingAverageCache.get(candles);
+  if (!byWindow) {
+    byWindow = new Map();
+    movingAverageCache.set(candles, byWindow);
+  }
+
+  const key = `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}`;
+  const cached = byWindow.get(key);
+  if (cached) return cached;
+
+  const closes = candles.map((candle) => candle.close);
+  const series = {
+    short: ema(closes, 10),
+    medium: ema(closes, 50),
+    long: ema(closes, 100),
+  };
+  byWindow.set(key, series);
+  return series;
 }
 
 export function evaluateSupportResistance(candles: Candle[], candleIndex: number): SupportResistanceEvaluation {

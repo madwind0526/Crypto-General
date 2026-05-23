@@ -4,7 +4,7 @@
 
 The recommended first version is a local-first trading simulation dashboard.
 
-- UI layer: trader selection bar, trader description panel, 12-symbol trend board, active trade marker, performance widgets, trade history view.
+- UI layer: trader selection bar, trader description panel, 9-symbol trend board, active trade marker, performance widgets, trade history view.
 - Strategy layer: one strategy module per trader persona.
 - Indicator layer: RSI, MACD, Bollinger Bands, volume spike, volatility proxy, and anomaly scoring.
 - Simulation layer: historical candle playback, order fill assumptions, fees, slippage, position tracking, and performance metrics.
@@ -52,22 +52,22 @@ data/local/traders/
   momentum/
     scenarios/
     simulations/
-    selected-symbols.json
+    selected-symbols.<mode>.json
     trade-log.jsonl
   mean-reversion/
     scenarios/
     simulations/
-    selected-symbols.json
+    selected-symbols.<mode>.json
     trade-log.jsonl
   fear-greed/
     scenarios/
     simulations/
-    selected-symbols.json
+    selected-symbols.<mode>.json
     trade-log.jsonl
   anomaly/
     scenarios/
     simulations/
-    selected-symbols.json
+    selected-symbols.<mode>.json
     trade-log.jsonl
 ```
 
@@ -105,7 +105,7 @@ Backtests and paper simulations should report both versions.
 ## Recommended Trading Method Roadmap
 
 1. Regime-filtered momentum/trend following:
-   - Rank 12 symbols by trend strength, momentum, volume confirmation, and liquidity.
+   - Rank 9 symbols by trend strength, momentum, volume confirmation, and liquidity.
    - Enter only when the broader regime is trending.
    - Exit on trend weakness, trailing stop, or invalidation.
 2. Range/grid mean reversion:
@@ -116,7 +116,7 @@ Backtests and paper simulations should report both versions.
    - Add after reliable data feeds, fee modeling, and execution simulation.
    - Prefer paper trading first because costs, latency, borrow/funding, and exchange rules matter heavily.
 4. Anomaly/pump-signal detection:
-   - Build a daily candidate selector for 12 symbols with suitable price, liquidity, volatility, and historical spike/reversion behavior.
+   - Build a daily candidate selector with suitable price, liquidity, volatility, and historical spike/reversion behavior.
    - Detect early public-market signals such as sudden relative volume, rapid multi-candle acceleration, order-book imbalance, spread change, and abnormal relative strength.
    - Exit using time stop, trailing stop, volume fade, acceleration failure, or sharp reversal.
    - Treat this as a high-risk anomaly strategy, not participation in manipulation.
@@ -142,16 +142,16 @@ Current implementation status:
 - `buildTraderOptimizationPlan` can run the required A/B/C flow in memory: candidate markets by trade value, per-market scenario optimization, and selected monitoring markets.
 - `compareStrategiesByGuideMode` is connected to the dashboard summary so strict and ignored modes can be compared side by side.
 - `src/simulation/dailyOperation.ts` implements the current-position loop for hold, buy, sell, and rotate decisions.
-- `src/app/App.tsx` presents the product as a left-menu/two-pane tool surface for scenario building, reports, guideline review, and four Daily Operation Simulation screens.
-- Daily Operation screens are mapped as General-A -> momentum, General-B -> range/grid, General-C -> relative/arbitrage proxy, and anomaly -> anomaly signal trader. Each has a Guideline O/X toggle and a 12-chart monitoring board.
-- Daily chart popups expose large graph, trade history, hourly returns for all four scenarios, and hourly balance for all four scenarios.
+- `src/app/App.tsx` presents the product as a left-menu/two-pane tool surface for scenario building, reports, guideline/safety review, and five General Daily Operation Simulation screens.
+- Daily Operation screens are mapped as General-A -> momentum, General-B -> range/grid, General-C -> relative/arbitrage proxy, General-D -> re-entry, and General-E -> average-drop cycle. Each has linked Guideline O/X, Safety O/X, and WS O/X controls with a 9-chart monitoring board.
+- Daily chart popups expose large graph, trade history, returns, and balance views for the active scenario/case.
 - Scenario/guideline import/export controls are present as UI hooks; persistence validation and applying imported files remain future work.
-- Daily Operation screens prefer `public/market/upbit-krw-1m-daily.json` when available. The 5-minute cache remains the report/backtest cache and fallback.
+- Daily Operation screens prefer `public/market/upbit-krw-1m-daily.json` when available. Baseline backtracking uses the 1-minute, 7-day cache.
 - `fetch:upbit:1m:daily` reads the current selected-symbol files, builds the selected-market union, and fetches recent 1-minute candles.
-- `paper:sim:1m:daily` runs all four traders in strict and ignored guide-rule modes on the 1-minute daily cache and writes summaries under `data/local/paper-trading-1m-daily/`.
+- `paper:sim:1m:daily` runs all five General traders across Guideline/Safety cases on the 1-minute daily cache and writes summaries under `data/local/paper-trading-1m-daily/`.
 - `paper:sim:1m:daily` also writes `public/market/paper-trading-1m-daily-results.json` so the browser can use 1-minute paper trades and equity curves.
-- General and anomaly refreshes are separate UI/API paths: General runs the full 5-minute top-30 optimization pipeline; anomaly runs the selected-market 1-minute daily fetch and 1-minute paper simulation.
-- General Scenario Report is split into General-A, General-B, and General-C sections.
+- General refresh runs the full 1-minute top-30 optimization pipeline and selects 9 monitored markets per strategy.
+- General Scenario Report is split into General-A, General-B, General-C, General-D, and General-E sections.
 - Daily Operation cards sort by latest candle-window return and chart popups show scrolled trade history plus return/balance SVG trend graphs.
 - True grid/random parameter search and walk-forward validation are still pending.
 
@@ -172,7 +172,7 @@ Required optimization workflow:
 
 - For A/B/C traders, scan all Upbit KRW markets and pick the top 30 by trading value.
 - Optimize each trader's parameters separately for each of the 30 markets.
-- Rank the 30 market-specific scenarios by return and quality, then select 12 markets for daily monitoring.
+- Rank the 30 market-specific scenarios by pure return, with quality score as a tie-breaker, then select 9 markets for daily monitoring.
 - During daily operation, use each market's own optimized parameters.
 - If multiple markets fire a buy signal, choose the strongest signal or the higher-quality market.
 - If a better opportunity appears while holding a position, compare expected return, risk, fees, and guide-rule alignment before rotating.
@@ -180,8 +180,8 @@ Required optimization workflow:
 Next implementation detail:
 
 - Fetch or cache enough Upbit KRW markets to support top-30 selection.
-- Persist `TraderOptimizationPlan` outputs into `data/local/traders/<trader>/selected-symbols.json`.
-- Add UI display for candidate rank, selected 12 markets, selected scenario, guide mode, return, drawdown, and rejected guide-rule signals.
+- Persist `TraderOptimizationPlan` outputs into `data/local/traders/<trader>/selected-symbols.<mode>.json`.
+- Add UI display for candidate rank, selected 9 markets, selected scenario, guide/safety mode, return, drawdown, and rejected guide-rule/safety signals.
 
 Current implementation:
 
@@ -196,12 +196,12 @@ This trader tries to detect abnormal public-market behavior in coins that histor
 
 Operational data flow:
 
-- Each day, scan all Upbit KRW markets and choose 12 anomaly candidates from the latest 90 days of compressed 5-minute or 10-minute history.
-- During the trading day, monitor only those 12 candidates with 1-minute candles.
+- Each day, scan Upbit KRW markets and choose the active anomaly monitoring candidates from recent 1-minute data.
+- During the trading day, monitor those candidates with 1-minute candles.
 - Use 1-minute data for real-time detection, not as the default long-term storage format.
 - After monitoring, compress normal 1-minute candles into 5-minute or 10-minute candles.
 - Keep raw 1-minute data only around triggered events where later review needs exact timing.
-- Retain only the latest 90 days of compressed history and prune older data.
+- Retain only the needed rolling windows and prune older data.
 
 Current implementation:
 
@@ -255,7 +255,7 @@ Risk controls:
 - Unit test each strategy's decision output for known market states.
 - Backtest simulation should be deterministic from the same input data.
 - Test edge cases: missing candles, zero volume, rapid gaps, insufficient balance, duplicate buy/sell signals, and fee/slippage impact.
-- UI verification should check that 12 symbol panels fit without overlap and active trade markers remain visible.
+- UI verification should check that 9 symbol panels fit without overlap and active trade markers remain visible.
 - Before Windows packaging, verify filesystem data access, API-key storage, app update behavior, installer signing expectations, and whether a local backend process is needed.
 - Keep market data as external JSON (`public/market/*.json`) instead of embedding large candle arrays in TypeScript modules.
 - Use `lightweight-charts` for market visualization. Current symbol cards and the large market modal render candlesticks with quote-volume histogram bars, candle-magnet crosshair hover, OHLC/value tooltip, and N-minute/N-hour/N-day/N-month aggregation.

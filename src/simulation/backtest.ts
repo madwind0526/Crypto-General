@@ -37,26 +37,43 @@ export function runBacktest(
 
   for (let candleIndex = 0; candleIndex < candles.length; candleIndex += 1) {
     const candle = candles[candleIndex];
+    let riskExited = false;
     if (position) {
       position.holdCandles += 1;
-      position.highestPrice = Math.max(position.highestPrice, candle.high);
+      const previousHighestPrice = position.highestPrice;
 
-      const stopPrice = position.averagePrice * (1 - (scenario.params.stopLossPct ?? 0));
-      const trailingStop = position.highestPrice * (1 - (scenario.params.trailingStopPct ?? 0));
-      const takeProfit = position.averagePrice * (1 + (scenario.params.takeProfitPct ?? Number.POSITIVE_INFINITY));
+      const stopLossPct = scenario.params.stopLossPct ?? scenario.params.emergencyStopPct ?? 0;
+      const trailingStopPct = scenario.params.trailingStopPct ?? 0;
+      const takeProfitPct = scenario.params.takeProfitPct ?? 0;
+      const stopPrice = position.averagePrice * (1 - stopLossPct);
+      const trailingStop = previousHighestPrice * (1 - trailingStopPct);
+      const takeProfit = position.averagePrice * (1 + takeProfitPct);
+      const triggeredStops = [
+        stopLossPct > 0 && candle.low <= stopPrice ? stopPrice : null,
+        trailingStopPct > 0 && candle.low <= trailingStop ? trailingStop : null,
+      ].filter((price): price is number => price !== null);
+      const takeProfitTriggered = takeProfitPct > 0 && candle.high >= takeProfit;
 
-      if (
-        (scenario.params.stopLossPct && candle.low <= stopPrice) ||
-        (scenario.params.trailingStopPct && candle.low <= trailingStop) ||
-        (scenario.params.takeProfitPct && candle.high >= takeProfit)
-      ) {
-        const exitPrice = Math.max(Math.min(candle.close, takeProfit), Math.max(stopPrice, trailingStop));
-        const roundTripReturn = closePosition(exitPrice, ["risk-rule-exit"], candle.timestamp);
+      if (triggeredStops.length > 0 || takeProfitTriggered) {
+        const exitPrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
+        const roundTripReturn = closePosition(exitPrice * (1 - config.slippageRate), ["risk-rule-exit"], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
+        riskExited = true;
+      }
+
+      if (position) {
+        position.highestPrice = Math.max(position.highestPrice, candle.high);
       }
     }
 
     const portfolioValue = cash + (position ? position.quantity * candle.close : 0);
+    if (riskExited) {
+      peakValue = Math.max(peakValue, portfolioValue);
+      maxDrawdown = Math.max(maxDrawdown, peakValue === 0 ? 0 : (peakValue - portfolioValue) / peakValue);
+      equityCurve.push({ timestamp: candle.timestamp, value: portfolioValue });
+      continue;
+    }
+
     const decision = strategy.decide(
       {
         market: candle.market,

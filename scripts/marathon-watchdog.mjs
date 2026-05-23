@@ -14,13 +14,14 @@ const durationMs = Number(process.env.MARATHON_DURATION_HOURS ?? 24) * 60 * 60 *
 const restartDelayMs = Number(process.env.MARATHON_RESTART_DELAY_SECONDS ?? 15) * 1000;
 const staleMs = Number(process.env.MARATHON_STALE_MINUTES ?? 45) * 60 * 1000;
 const checkMs = Number(process.env.MARATHON_WATCHDOG_CHECK_SECONDS ?? 60) * 1000;
+const continuous = process.env.MARATHON_WATCHDOG_CONTINUOUS !== "false";
 
 await mkdir(stateDir, { recursive: true });
 const startedAt = Date.now();
-const deadline = startedAt + durationMs;
 let child = null;
 let stopping = false;
 let restartCount = 0;
+let runCount = 0;
 
 await writeJson(watchdogPidPath, { pid: process.pid, startedAt: new Date(startedAt).toISOString() });
 await writeWatchdogStatus("starting");
@@ -32,46 +33,69 @@ process.on("SIGTERM", () => {
   shutdown("SIGTERM", 143).catch(() => process.exit(143));
 });
 
-while (!stopping && Date.now() < deadline) {
-  const remainingHours = Math.max(0.01, (deadline - Date.now()) / 3_600_000);
-  const exitCode = await runChild(remainingHours);
-  if (stopping || Date.now() >= deadline) break;
+while (!stopping) {
+  runCount += 1;
+  const exitCode = await runChild(durationMs / 3_600_000, runCount);
+  if (stopping) break;
+  if (!continuous) break;
 
   restartCount += 1;
   await writeWatchdogStatus("restarting", {
     lastExitCode: exitCode,
     restartCount,
+    runCount,
     nextRestartAt: new Date(Date.now() + restartDelayMs).toISOString(),
   });
   await sleep(restartDelayMs);
 }
 
-await writeWatchdogStatus("completed", { restartCount, completedAt: new Date().toISOString() });
+await writeWatchdogStatus(continuous ? "stopped" : "completed", {
+  restartCount,
+  runCount,
+  completedAt: new Date().toISOString(),
+});
 
-async function runChild(remainingHours) {
-  await writeWatchdogStatus("running", { restartCount, remainingHours });
+async function runChild(runHours, currentRunCount) {
+  const runDeadline = Date.now() + runHours * 3_600_000;
+  await writeWatchdogStatus("running", {
+    restartCount,
+    runCount: currentRunCount,
+    currentRunHours: runHours,
+    currentRunDeadline: new Date(runDeadline).toISOString(),
+  });
 
   return await new Promise((resolve) => {
     child = spawn(process.execPath, [marathonScript], {
       cwd: root,
       env: {
         ...process.env,
-        MARATHON_DURATION_HOURS: String(remainingHours),
+        MARATHON_DURATION_HOURS: String(runHours),
         MARATHON_WATCHDOG_CHILD: "true",
       },
       stdio: "inherit",
     });
-    writeWatchdogStatus("running", { restartCount, remainingHours }).catch((error) =>
-      console.error("[marathon-watchdog] status write failed", error),
-    );
+    writeWatchdogStatus("running", {
+      restartCount,
+      runCount: currentRunCount,
+      currentRunHours: runHours,
+      currentRunDeadline: new Date(runDeadline).toISOString(),
+    }).catch((error) => console.error("[marathon-watchdog] status write failed", error));
 
     const staleTimer = setInterval(async () => {
       if (!child || stopping) return;
       const staleFor = await getStatusStaleForMs();
+      await writeWatchdogStatus("running", {
+        restartCount,
+        runCount: currentRunCount,
+        currentRunHours: runHours,
+        currentRunDeadline: new Date(runDeadline).toISOString(),
+        statusStaleForMs: staleFor,
+      });
       if (staleFor === null || staleFor < staleMs) return;
 
       await writeWatchdogStatus("stale-restart", {
         restartCount,
+        runCount: currentRunCount,
         childPid: child.pid,
         staleForMs: staleFor,
       });
@@ -113,6 +137,7 @@ async function shutdown(reason, exitCode) {
   await writeWatchdogStatus("stopped", {
     reason,
     restartCount,
+    runCount,
     stoppedAt: new Date().toISOString(),
   });
   process.exit(exitCode);
@@ -124,7 +149,7 @@ async function writeWatchdogStatus(status, extra = {}) {
     pid: process.pid,
     childPid: child?.pid ?? null,
     startedAt: new Date(startedAt).toISOString(),
-    deadline: new Date(deadline).toISOString(),
+    mode: continuous ? "continuous" : "single",
     updatedAt: new Date().toISOString(),
     ...extra,
   });

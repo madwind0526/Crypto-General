@@ -6,12 +6,9 @@ import { createWriteStream, mkdirSync, readFileSync, writeFileSync, unlinkSync }
 
 const refreshStepSets = {
   general: [
-  { label: "Fetch top-30 chunk 0 / latest 30 days", script: "fetch:upbit:top30:chunk0" },
-  { label: "Fetch top-30 chunk 1 / 30-60 days", script: "fetch:upbit:top30:chunk1" },
-  { label: "Fetch top-30 chunk 2 / 60-90 days", script: "fetch:upbit:top30:chunk2" },
-  { label: "Merge top-30 market chunks", script: "merge:upbit:top30" },
+  { label: "Fetch top-30 1m / latest 7 days", script: "fetch:upbit:1m:backtracking" },
   { label: "Persist trader optimization plans", script: "persist:traders" },
-  { label: "Build dashboard candle cache", script: "build:dashboard-cache" },
+  { label: "Build dashboard candle cache", script: "build:dashboard-cache:1m:backtracking" },
   { label: "Build dashboard results", script: "build:dashboard-results" },
   ],
   daily: [

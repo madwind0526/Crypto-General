@@ -60,6 +60,37 @@ describe("range re-entry strategy", () => {
     expect(decision.action).toBe("sell");
     expect(decision.reasonCodes).toContain("profit-target-exit");
   });
+
+  it("exits when the candle low breaches the emergency stop even if the close recovers", () => {
+    const candles = createCandles("KRW-TEST", [...Array(79).fill(100), 100]);
+    candles[candles.length - 1] = {
+      ...candles[candles.length - 1],
+      low: 94,
+    };
+    const candleIndex = candles.length - 1;
+    const position: Position = {
+      averagePrice: 100,
+      highestPrice: 100,
+      holdCandles: 12,
+      market: "KRW-TEST",
+      openedAt: candles[60].timestamp,
+      quantity: 1,
+    };
+
+    const decision = rangeReentryStrategy.decide(
+      {
+        market: "KRW-TEST",
+        candles,
+        candleIndex,
+        position,
+        portfolioValue: 1_000_000,
+      },
+      rangeReentryScenario,
+    );
+
+    expect(decision.action).toBe("sell");
+    expect(decision.reasonCodes).toContain("emergency-stop-exit");
+  });
 });
 
 function createCandles(market: string, closes: number[]): Candle[] {

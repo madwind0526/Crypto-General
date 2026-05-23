@@ -120,11 +120,12 @@ export const rangeReentryStrategy: Strategy = {
 
     if (position) {
       const gainFromEntry = (current.close - position.averagePrice) / position.averagePrice;
+      const lowFromEntry = (current.low - position.averagePrice) / position.averagePrice;
       const targetReached = position.highestPrice >= position.averagePrice * (1 + scenario.params.profitTargetPct);
       const trailingStop = position.highestPrice * (1 - scenario.params.trailingStopAfterProfitPct);
 
-      if (gainFromEntry <= -scenario.params.emergencyStopPct && downtrend) {
-        return sell(["emergency-downtrend-exit"]);
+      if (lowFromEntry <= -scenario.params.emergencyStopPct || gainFromEntry <= -scenario.params.emergencyStopPct) {
+        return sell([downtrend ? "emergency-downtrend-exit" : "emergency-stop-exit"]);
       }
 
       if (targetReached && uptrend && current.close <= trailingStop) {
