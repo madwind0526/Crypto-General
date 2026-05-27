@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { buildTraderOptimizationPlan } from "../src/simulation/traderOptimization";
-import { strategies } from "../src/strategies";
+import { buildSumOptimizationPlan, buildTraderOptimizationPlan, type TraderOptimizationPlan } from "../src/simulation/traderOptimization";
+import { generalSumStrategy, strategies } from "../src/strategies";
 import type { Candle, GuideRuleMode, Strategy } from "../src/types/trading";
 
 interface MarketCachePayload {
@@ -27,18 +27,45 @@ const optimizationLookbackCandles = Number(process.env.OPTIMIZATION_MAX_CANDLES 
 const payload = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
 const generatedAt = new Date().toISOString();
 
+// Keep full plans in memory so General-Sum can derive its overlap plan from them.
+const fullPlansByMode: Partial<Record<GuideRuleMode, TraderOptimizationPlan[]>> = {};
+
 for (const strategy of strategies) {
-  await persistStrategy(strategy, payload, generatedAt);
+  const plansByMode = await persistStrategy(strategy, payload, generatedAt);
+  for (const [mode, plan] of Object.entries(plansByMode) as [GuideRuleMode, TraderOptimizationPlan][]) {
+    if (!fullPlansByMode[mode]) fullPlansByMode[mode] = [];
+    fullPlansByMode[mode]!.push(plan);
+  }
+}
+
+// Persist General-Sum plan (overlap of base strategy plans).
+for (const guideRuleMode of guideRuleModes) {
+  const basePlans = fullPlansByMode[guideRuleMode] ?? [];
+  if (basePlans.length === 0) continue;
+  const sumPlan = buildSumOptimizationPlan(generalSumStrategy, basePlans, payload.candlesByMarket, {
+    candidateMarketCount,
+    monitoringMarketCount,
+    tradeValueLookbackCandles,
+    optimizationLookbackCandles,
+    guideRuleMode,
+  });
+  await persistSumPlan(sumPlan, payload, guideRuleMode, generatedAt);
 }
 
 console.log(`Persisted trader plans under ${path.relative(root, outputRoot)}`);
 
-async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, generatedAt: string) {
+async function persistStrategy(
+  strategy: Strategy,
+  payload: MarketCachePayload,
+  generatedAt: string,
+): Promise<Partial<Record<GuideRuleMode, TraderOptimizationPlan>>> {
   const traderDir = path.join(outputRoot, strategy.id);
   const marketParamsDir = path.join(traderDir, "market-params");
   await mkdir(path.join(traderDir, "scenarios"), { recursive: true });
   await mkdir(path.join(traderDir, "simulations"), { recursive: true });
   await mkdir(marketParamsDir, { recursive: true });
+
+  const result: Partial<Record<GuideRuleMode, TraderOptimizationPlan>> = {};
 
   for (const guideRuleMode of guideRuleModes) {
     const plan = buildTraderOptimizationPlan(strategy, payload.candlesByMarket, {
@@ -48,49 +75,79 @@ async function persistStrategy(strategy: Strategy, payload: MarketCachePayload, 
       optimizationLookbackCandles,
       guideRuleMode,
     });
-    const compactPlan = compactOptimizationPlan(plan);
-    const exportPayload = {
-      generatedAt,
-      marketCache: {
-        path: path.relative(root, marketCachePath),
-        source: payload.source,
-        generatedAt: payload.generatedAt,
-        candleUnitMinutes: payload.candleUnitMinutes,
-        cachedMarketCount: payload.selectedMarkets.length,
-      },
-      plan: compactPlan,
-    };
-    const scenarioPath = path.join(traderDir, "scenarios", `optimization-${guideRuleMode}.json`);
-    const selectedPath = path.join(traderDir, `selected-symbols.${guideRuleMode}.json`);
-    await writeJson(scenarioPath, exportPayload);
-    await writeJson(selectedPath, {
-      generatedAt,
-      guideRuleMode,
-      strategyId: strategy.id,
-      strategyName: strategy.name,
-      selectedMarkets: compactPlan.selectedMarkets,
-    });
-    await persistMarketParams(marketParamsDir, strategy, compactPlan, guideRuleMode, generatedAt);
-
-    if (guideRuleMode === "ignored") {
-      await writeJson(path.join(traderDir, "selected-symbols.json"), {
-        generatedAt,
-        guideRuleMode,
-        strategyId: strategy.id,
-        strategyName: strategy.name,
-        selectedMarkets: compactPlan.selectedMarkets,
-      });
-    }
-
+    result[guideRuleMode] = plan;
+    await savePlanFiles(strategy.id, strategy.name, plan, payload, guideRuleMode, generatedAt);
     console.log(
       `${strategy.id}/${guideRuleMode}: ${plan.candidateMarkets.length} candidates, ${plan.selectedMarkets.length} selected`,
     );
+  }
+
+  return result;
+}
+
+async function persistSumPlan(
+  plan: TraderOptimizationPlan,
+  payload: MarketCachePayload,
+  guideRuleMode: GuideRuleMode,
+  generatedAt: string,
+) {
+  await savePlanFiles(plan.strategyId, plan.strategyName, plan, payload, guideRuleMode, generatedAt);
+  console.log(
+    `${plan.strategyId}/${guideRuleMode}: ${plan.candidateMarkets.length} overlap candidates, ${plan.selectedMarkets.length} selected`,
+  );
+}
+
+async function savePlanFiles(
+  strategyId: string,
+  strategyName: string,
+  plan: TraderOptimizationPlan,
+  payload: MarketCachePayload,
+  guideRuleMode: GuideRuleMode,
+  generatedAt: string,
+) {
+  const traderDir = path.join(outputRoot, strategyId);
+  const marketParamsDir = path.join(traderDir, "market-params");
+  await mkdir(path.join(traderDir, "scenarios"), { recursive: true });
+  await mkdir(marketParamsDir, { recursive: true });
+
+  const compactPlan = compactOptimizationPlan(plan);
+  const exportPayload = {
+    generatedAt,
+    marketCache: {
+      path: path.relative(root, marketCachePath),
+      source: payload.source,
+      generatedAt: payload.generatedAt,
+      candleUnitMinutes: payload.candleUnitMinutes,
+      cachedMarketCount: payload.selectedMarkets.length,
+    },
+    plan: compactPlan,
+  };
+  const scenarioPath = path.join(traderDir, "scenarios", `optimization-${guideRuleMode}.json`);
+  const selectedPath = path.join(traderDir, `selected-symbols.${guideRuleMode}.json`);
+  await writeJson(scenarioPath, exportPayload);
+  await writeJson(selectedPath, {
+    generatedAt,
+    guideRuleMode,
+    strategyId,
+    strategyName,
+    selectedMarkets: compactPlan.selectedMarkets,
+  });
+  await persistMarketParams(marketParamsDir, strategyId, compactPlan, guideRuleMode, generatedAt);
+
+  if (guideRuleMode === "ignored") {
+    await writeJson(path.join(traderDir, "selected-symbols.json"), {
+      generatedAt,
+      guideRuleMode,
+      strategyId,
+      strategyName,
+      selectedMarkets: compactPlan.selectedMarkets,
+    });
   }
 }
 
 async function persistMarketParams(
   marketParamsDir: string,
-  strategy: Strategy,
+  strategyId: string,
   plan: ReturnType<typeof compactOptimizationPlan>,
   guideRuleMode: GuideRuleMode,
   generatedAt: string,
@@ -100,8 +157,7 @@ async function persistMarketParams(
       generatedAt,
       guideRuleMode,
       market: item.market,
-      strategyId: strategy.id,
-      strategyName: strategy.name,
+      strategyId,
       scenarioId: item.bestResult.scenarioId,
       scenarioName: item.bestResult.scenarioName,
       params: item.bestResult.scenarioParams,
