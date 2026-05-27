@@ -37,7 +37,7 @@ type ScreenId =
   | "daily-general-a"
   | "daily-general-b"
   | "daily-general-c"
-  | "daily-anomaly"
+  | "daily-general-d"
   | "daily-general-e"
   | "daily-general-sum";
 type PopupTab = "graph" | "trades" | "returns" | "balance";
@@ -56,7 +56,7 @@ const screenIds: ScreenId[] = [
   "daily-general-a",
   "daily-general-b",
   "daily-general-c",
-  "daily-anomaly",
+  "daily-general-d",
   "daily-general-e",
   "daily-general-sum",
 ];
@@ -205,7 +205,7 @@ const menuSections: MenuSection[] = [
       { id: "daily-general-a", label: "General-A" },
       { id: "daily-general-b", label: "General-B" },
       { id: "daily-general-c", label: "General-C" },
-      { id: "daily-anomaly", label: "General-D" },
+      { id: "daily-general-d", label: "General-D" },
       { id: "daily-general-e", label: "General-E" },
       { id: "daily-general-sum", label: "General-Sum" },
     ],
@@ -213,7 +213,7 @@ const menuSections: MenuSection[] = [
 ];
 
 const dailyScreens: Record<
-  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-anomaly" | "daily-general-e" | "daily-general-sum">,
+  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-general-d" | "daily-general-e" | "daily-general-sum">,
   { title: string; traderId: TraderId; description: string }
 > = {
   "daily-general-a": {
@@ -231,7 +231,7 @@ const dailyScreens: Record<
     traderId: "arbitrage",
     description: "상대가치/통계 기반으로 9개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
   },
-  "daily-anomaly": {
+  "daily-general-d": {
     title: "General-D Daily Operation",
     traderId: "general-d",
     description: "General-B 기반 박스권 재진입 전략으로 9개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
@@ -261,7 +261,7 @@ export function App() {
     "daily-general-a": "ignored",
     "daily-general-b": "ignored",
     "daily-general-c": "ignored",
-    "daily-anomaly": "ignored",
+    "daily-general-d": "ignored",
     "daily-general-e": "ignored",
     "daily-general-sum": "ignored",
   });
@@ -269,7 +269,7 @@ export function App() {
     "daily-general-a": "disabled",
     "daily-general-b": "disabled",
     "daily-general-c": "disabled",
-    "daily-anomaly": "disabled",
+    "daily-general-d": "disabled",
     "daily-general-e": "disabled",
     "daily-general-sum": "disabled",
   });
