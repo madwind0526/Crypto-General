@@ -34,7 +34,7 @@ const arbitrageScenarios: StrategyScenario[] = [
       zExit: -0.05,
       stopLossPct: 0.025,
       maxHoldCandles: 24,
-      minProfitPct: 0.003,  // smaller target for fast mean reversion
+      minProfitPct: 0.005,  // raised to 0.5% to reduce excessive trades
       cooldownBars: 3,
     },
   },

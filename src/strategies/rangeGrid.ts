@@ -15,6 +15,7 @@ export const rangeGridScenario: StrategyScenario = {
     stopLossPct: 0.04,
     takeProfitPct: 0.035,
     maxHoldCandles: 36,
+    minProfitPct: 0.005,  // exit only when return >= 0.5% (time-based exit always fires)
   },
 };
 
@@ -70,7 +71,14 @@ export const rangeGridStrategy: Strategy = {
     if (band == null || currentRsi === null) return hold("warming-up");
 
     if (position) {
-      if (current.close >= band.middle || position.holdCandles >= scenario.params.maxHoldCandles) {
+      const isTimeExit = position.holdCandles >= scenario.params.maxHoldCandles;
+      const isMeanReversionExit = current.close >= band.middle;
+      if (isTimeExit || isMeanReversionExit) {
+        const minProfitPct = (scenario.params.minProfitPct as number | undefined) ?? 0;
+        const returnPct = (current.close - position.averagePrice) / position.averagePrice;
+        if (!isTimeExit && minProfitPct > 0 && returnPct < minProfitPct) {
+          return hold("min-profit-wait");
+        }
         return { action: "sell", confidence: 0.66, reasonCodes: ["mean-reversion-exit"], targetWeight: 0 };
       }
       return hold("range-position-running");
