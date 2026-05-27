@@ -53,8 +53,17 @@ if (isTimeExit || isMeanReversionExit) {
 
 #### `src/strategies/arbitrage.ts` (General-C)
 
-- `relative-value-fast` 시나리오 `minProfitPct`: `0.003` → `0.005`
-  - default (0.005), deep (0.008)은 이미 0.5% 이상이므로 변경 없음
+시나리오별 홀드 기간에 맞게 tiered 적용:
+
+| 시나리오 | maxHoldCandles | 변경 전 | 변경 후 |
+|---------|--------------|--------|--------|
+| balanced (default) | 48 | 0.5% | **1.0%** |
+| fast | 24 | 0.3% | **0.5%** |
+| deep | 72 | 0.8% | 0.8% (유지) |
+
+tiered 적용 효과 검증 (fast:4코인, balanced:1코인, deep:4코인 분포):
+- C 0.5%/0.5%/0.8%: 96.15% / 543 trades
+- C 1.0%/0.5%/0.8%: 94.54% / 535 trades  → 차이 미미, 설계 일관성 확보
 
 ### D 전략 (General-D)
 

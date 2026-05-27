@@ -12,7 +12,7 @@ export const arbitrageScenario: StrategyScenario = {
     zExit: -0.2,
     stopLossPct: 0.03,
     maxHoldCandles: 48,
-    minProfitPct: 0.005,  // exit only when z recovers AND return >= this threshold
+    minProfitPct: 0.010,  // exit only when z recovers AND return >= this threshold
     cooldownBars: 5,       // bars to skip after closing before re-entering
   },
 };
@@ -34,7 +34,7 @@ const arbitrageScenarios: StrategyScenario[] = [
       zExit: -0.05,
       stopLossPct: 0.025,
       maxHoldCandles: 24,
-      minProfitPct: 0.005,  // raised to 0.5% to reduce excessive trades
+      minProfitPct: 0.005,  // fast scenario: 0.5% (quick mean-reversion, lower threshold)
       cooldownBars: 3,
     },
   },
