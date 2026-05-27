@@ -3,7 +3,7 @@ import { rangeReentryScenario, rangeReentryStrategy } from "../src/strategies/ra
 import type { Candle, Position } from "../src/types/trading";
 
 describe("range re-entry strategy", () => {
-  it("waits for a pullback from the previous sell price before re-entering", () => {
+  it("re-enters immediately after a previous sell without waiting for a price drop", () => {
     const candles = createCandles("KRW-TEST", [...Array(79).fill(100), 95]);
     const candleIndex = candles.length - 1;
 
@@ -17,7 +17,7 @@ describe("range re-entry strategy", () => {
       },
       rangeReentryScenario,
     );
-    const blockedReentry = rangeReentryStrategy.decide(
+    const immediateReentry = rangeReentryStrategy.decide(
       {
         market: "KRW-TEST",
         candles,
@@ -30,8 +30,7 @@ describe("range re-entry strategy", () => {
     );
 
     expect(firstEntry.action).toBe("buy");
-    expect(blockedReentry.action).toBe("hold");
-    expect(blockedReentry.reasonCodes).toContain("waiting-reentry-drop");
+    expect(immediateReentry.action).toBe("buy");
   });
 
   it("sells only after the configured profit target is reached outside an uptrend", () => {

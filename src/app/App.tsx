@@ -20,8 +20,8 @@ import {
   type StrategyComparison,
   type StrategyGuideModeComparison,
 } from "../simulation/optimizer";
-import { buildTraderOptimizationPlans, type TraderOptimizationPlan } from "../simulation/traderOptimization";
-import { strategies } from "../strategies";
+import { buildSumOptimizationPlan, buildTraderOptimizationPlans, type TraderOptimizationPlan } from "../simulation/traderOptimization";
+import { generalSumStrategy, strategies } from "../strategies";
 import { traderProfiles, type TraderProfile } from "../traders/profiles";
 import type { BacktestResult, BlockedSignal, Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
 import { MarketChart } from "../ui/MarketChart";
@@ -38,7 +38,8 @@ type ScreenId =
   | "daily-general-b"
   | "daily-general-c"
   | "daily-anomaly"
-  | "daily-general-e";
+  | "daily-general-e"
+  | "daily-general-sum";
 type PopupTab = "graph" | "trades" | "returns" | "balance";
 type OperationPopupTab = Exclude<PopupTab, "graph">;
 type GuideFilterMode = GuideRuleMode | "all";
@@ -57,6 +58,7 @@ const screenIds: ScreenId[] = [
   "daily-general-c",
   "daily-anomaly",
   "daily-general-e",
+  "daily-general-sum",
 ];
 
 type PopupState =
@@ -205,12 +207,13 @@ const menuSections: MenuSection[] = [
       { id: "daily-general-c", label: "General-C" },
       { id: "daily-anomaly", label: "General-D" },
       { id: "daily-general-e", label: "General-E" },
+      { id: "daily-general-sum", label: "General-Sum" },
     ],
   },
 ];
 
 const dailyScreens: Record<
-  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-anomaly" | "daily-general-e">,
+  Extract<ScreenId, "daily-general-a" | "daily-general-b" | "daily-general-c" | "daily-anomaly" | "daily-general-e" | "daily-general-sum">,
   { title: string; traderId: TraderId; description: string }
 > = {
   "daily-general-a": {
@@ -239,6 +242,12 @@ const dailyScreens: Record<
     description:
       "최근 평균 거래가격 대비 급락하면 매수하고, 평균가격 기반 손절/익절 조건으로 반복 매매하는 전략입니다.",
   },
+  "daily-general-sum": {
+    title: "General-Sum Daily Operation",
+    traderId: "general-sum",
+    description:
+      "A~E 전략에 중복 등장한 코인 9개를 감시하고, 각 코인의 실시간 추세에 따라 적합한 전략으로 자동 전환합니다.",
+  },
 };
 
 export function App() {
@@ -254,6 +263,7 @@ export function App() {
     "daily-general-c": "ignored",
     "daily-anomaly": "ignored",
     "daily-general-e": "ignored",
+    "daily-general-sum": "ignored",
   });
   const [dailyAutoBlockModes, setDailyAutoBlockModes] = useState<Record<string, AutoBlockMode>>({
     "daily-general-a": "disabled",
@@ -261,6 +271,7 @@ export function App() {
     "daily-general-c": "disabled",
     "daily-anomaly": "disabled",
     "daily-general-e": "disabled",
+    "daily-general-sum": "disabled",
   });
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [marketData, setMarketData] = useState<DashboardMarketData>(() => loadSampleMarketData());
@@ -414,26 +425,32 @@ export function App() {
     [dashboardResults, marketData],
   );
   const optimizationPlansByMode = useMemo(
-    () => ({
-      strict:
-        dashboardResults?.optimizationPlansByGuideMode?.strict ??
-        dashboardResults?.optimizationPlans ??
-        buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
+    () => {
+      function buildMode(mode: GuideRuleMode): TraderOptimizationPlan[] {
+        const cached =
+          dashboardResults?.optimizationPlansByGuideMode?.[mode] ??
+          dashboardResults?.optimizationPlans ??
+          null;
+        const basePlans = cached ?? buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
           candidateMarketCount: 30,
           monitoringMarketCount: dailyMonitoringMarketCount,
-          guideRuleMode: "strict",
-          config: { ...defaultBacktestConfig, guideRuleMode: "strict" },
-        }),
-      ignored:
-        dashboardResults?.optimizationPlansByGuideMode?.ignored ??
-        dashboardResults?.optimizationPlans ??
-        buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
+          guideRuleMode: mode,
+          config: { ...defaultBacktestConfig, guideRuleMode: mode },
+        });
+        // Skip if sum plan is already in the cached plans
+        if (basePlans.some((p) => p.strategyId === "general-sum")) return basePlans;
+        const sourcePlans = basePlans.filter((p) => p.strategyId !== "general-sum");
+        if (sourcePlans.length === 0) return basePlans;
+        const sumPlan = buildSumOptimizationPlan(generalSumStrategy, sourcePlans, marketData.candlesByMarket, {
           candidateMarketCount: 30,
           monitoringMarketCount: dailyMonitoringMarketCount,
-          guideRuleMode: "ignored",
-          config: { ...defaultBacktestConfig, guideRuleMode: "ignored" },
-        }),
-    }),
+          guideRuleMode: mode,
+          config: { ...defaultBacktestConfig, guideRuleMode: mode },
+        });
+        return [...basePlans, sumPlan];
+      }
+      return { strict: buildMode("strict"), ignored: buildMode("ignored") };
+    },
     [dashboardResults, marketData],
   );
   const guideModeComparisons = useMemo(

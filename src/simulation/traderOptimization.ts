@@ -117,6 +117,67 @@ export function compareOptimizationsByPureReturn(a: MarketScenarioOptimization, 
   return b.bestResult.returnRate - a.bestResult.returnRate || b.score - a.score;
 }
 
+export function buildSumOptimizationPlan(
+  strategy: Strategy,
+  sourcePlans: TraderOptimizationPlan[],
+  candlesByMarket: Record<string, Candle[]>,
+  options: Partial<TraderOptimizationOptions> = {},
+): TraderOptimizationPlan {
+  const resolved = { ...defaultOptions, ...options };
+  const config = { ...defaultBacktestConfig, ...resolved.config, guideRuleMode: resolved.guideRuleMode };
+
+  // Score markets by overlap: rank 1 in a plan earns planLength points, rank N earns 1 point.
+  const scoreMap = new Map<string, number>();
+  for (const plan of sourcePlans) {
+    plan.selectedMarkets.forEach((m, idx) => {
+      const rankScore = plan.selectedMarkets.length - idx;
+      scoreMap.set(m.market, (scoreMap.get(m.market) ?? 0) + rankScore);
+    });
+  }
+
+  const overlapCandidates: MarketTradeValueRank[] = [...scoreMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, resolved.candidateMarketCount)
+    .map(([market, overlapScore]) => ({
+      market,
+      tradeValue: overlapScore,
+      candleCount: candlesByMarket[market]?.length ?? 0,
+    }))
+    .filter((c) => c.candleCount >= resolved.minCandles)
+    .filter((c) => !strategy.excludedMarkets?.has(c.market));
+
+  const optimizedMarkets = overlapCandidates
+    .map((candidate, index) => {
+      const candles = trimCandles(candlesByMarket[candidate.market] ?? [], resolved.optimizationLookbackCandles);
+      const bestResult = optimizeStrategyForMarket(strategy, candles, config);
+      if (!bestResult) return null;
+      return {
+        market: candidate.market,
+        candidateRank: index + 1,
+        tradeValue: candidate.tradeValue,
+        score: scoreBacktestResult(bestResult),
+        bestResult,
+      };
+    })
+    .filter((result): result is MarketScenarioOptimization => result !== null)
+    .sort(compareOptimizationsByPureReturn);
+
+  const selectedMarkets = optimizedMarkets
+    .filter((m) => m.bestResult.tradeCount > 0)
+    .slice(0, resolved.monitoringMarketCount);
+
+  return {
+    strategyId: strategy.id,
+    strategyName: strategy.name,
+    guideRuleMode: resolved.guideRuleMode,
+    candidateMarketCount: resolved.candidateMarketCount,
+    monitoringMarketCount: resolved.monitoringMarketCount,
+    candidateMarkets: overlapCandidates,
+    optimizedMarkets,
+    selectedMarkets,
+  };
+}
+
 export function buildTraderOptimizationPlans(
   strategies: Strategy[],
   candlesByMarket: Record<string, Candle[]>,

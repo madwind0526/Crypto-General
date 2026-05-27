@@ -5,7 +5,7 @@ import path from "node:path";
 
 const UPBIT_BASE_URL = "https://api.upbit.com";
 const root = process.cwd();
-const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d", "general-e"];
+const strategyIds = ["momentum", "range-grid", "arbitrage", "general-d", "general-e", "general-sum"];
 const guideModes = ["strict", "ignored"];
 const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
 const publicCachePath = path.join(root, "public", "market", "upbit-krw-1m-daily.json");

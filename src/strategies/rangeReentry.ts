@@ -141,10 +141,6 @@ export const rangeReentryStrategy: Strategy = {
 
     if (downtrend) return hold("downtrend-entry-blocked");
 
-    const reentryAllowed =
-      lastSellPrice === undefined || current.close <= lastSellPrice * (1 - scenario.params.reentryDropPct);
-    if (!reentryAllowed) return hold("waiting-reentry-drop");
-
     const rangeEntry = sideways && current.close <= band.lower && currentRsi <= scenario.params.rsiMaxEntry;
     const uptrendPullbackEntry =
       uptrend &&

@@ -1,4 +1,4 @@
-export type TraderId = "momentum" | "range-grid" | "arbitrage" | "general-d" | "general-e" | "anomaly";
+export type TraderId = "momentum" | "range-grid" | "arbitrage" | "general-d" | "general-e" | "anomaly" | "general-sum";
 
 export type DecisionAction = "hold" | "buy" | "sell";
 
