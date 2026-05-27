@@ -31,11 +31,14 @@ export function runBacktest(
   const signalAudit: SignalAudit[] = [];
   const equityCurve: Array<{ timestamp: number; value: number }> = [];
   let lastSellPrice: number | undefined;
+  let lastSellCandleIndex: number | undefined;
+  let currentCandleIndex = 0;
   let peakValue = config.initialCash;
   let maxDrawdown = 0;
   const roundTripReturns: number[] = [];
 
   for (let candleIndex = 0; candleIndex < candles.length; candleIndex += 1) {
+    currentCandleIndex = candleIndex;
     const candle = candles[candleIndex];
     let riskExited = false;
     if (position) {
@@ -82,6 +85,7 @@ export function runBacktest(
         candles,
         candleIndex,
         lastSellPrice,
+        lastSellCandleIndex,
         position,
         portfolioValue,
       },
@@ -227,6 +231,7 @@ export function runBacktest(
     }
 
     lastSellPrice = price;
+    lastSellCandleIndex = currentCandleIndex;
     position = null;
     return entryCost === 0 ? 0 : realized / entryCost;
   }

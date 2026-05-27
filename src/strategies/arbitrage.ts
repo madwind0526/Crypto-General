@@ -12,6 +12,8 @@ export const arbitrageScenario: StrategyScenario = {
     zExit: -0.2,
     stopLossPct: 0.03,
     maxHoldCandles: 48,
+    minProfitPct: 0.005,  // exit only when z recovers AND return >= this threshold
+    cooldownBars: 5,       // bars to skip after closing before re-entering
   },
 };
 
@@ -32,6 +34,8 @@ const arbitrageScenarios: StrategyScenario[] = [
       zExit: -0.05,
       stopLossPct: 0.025,
       maxHoldCandles: 24,
+      minProfitPct: 0.003,  // smaller target for fast mean reversion
+      cooldownBars: 3,
     },
   },
   {
@@ -45,6 +49,8 @@ const arbitrageScenarios: StrategyScenario[] = [
       zExit: -0.35,
       stopLossPct: 0.045,
       maxHoldCandles: 72,
+      minProfitPct: 0.008,
+      cooldownBars: 10,
     },
   },
 ];
@@ -56,11 +62,13 @@ export const arbitrageStrategy: Strategy = {
   defaultScenario: arbitrageScenario,
   scenarios: arbitrageScenarios,
   decide(context: StrategyContext, scenario = arbitrageScenario): StrategyDecision {
-    const { candles, candleIndex, position } = context;
+    const { candles, candleIndex, position, lastSellCandleIndex } = context;
+    const params = scenario.params;
+    const current = candles[candleIndex];
     const indicators = getArbitrageIndicators(candles, scenario);
-    const window = indicators.returns.slice(Math.max(0, candleIndex - scenario.params.lookback), candleIndex);
+    const window = indicators.returns.slice(Math.max(0, candleIndex - params.lookback), candleIndex);
 
-    if (window.length < scenario.params.lookback) return hold("warming-up");
+    if (window.length < params.lookback) return hold("warming-up");
 
     const average = window.reduce((sum, value) => sum + value, 0) / window.length;
     // Use sample variance (n-1) for an unbiased estimator over the rolling window.
@@ -70,22 +78,40 @@ export const arbitrageStrategy: Strategy = {
 
     // returns[candleIndex] is guaranteed non-null here because window.length >= lookback > 0.
     const zScore = (indicators.returns[candleIndex] - average) / sd;
+    const minProfitPct = params.minProfitPct ?? 0;
+    const cooldownBars = params.cooldownBars ?? 0;
 
     if (position) {
-      if (zScore >= scenario.params.zExit || position.holdCandles >= scenario.params.maxHoldCandles) {
-        return { action: "sell", confidence: 0.58, reasonCodes: ["relative-value-normalized"], targetWeight: 0 };
+      const returnPct = (current.close - position.averagePrice) / position.averagePrice;
+      // Time-based safety exit always fires regardless of profit target.
+      if (position.holdCandles >= params.maxHoldCandles) {
+        return { action: "sell", confidence: 0.58, reasonCodes: ["max-hold-exit"], targetWeight: 0 };
+      }
+      // Signal exit: z-score recovered AND return reached minimum profit target.
+      if (zScore >= params.zExit) {
+        if (returnPct >= minProfitPct) {
+          return { action: "sell", confidence: 0.58, reasonCodes: ["relative-value-normalized", "profit-target"], targetWeight: 0 };
+        }
+        return hold("awaiting-profit-target");
       }
       return hold("relative-position-running");
     }
 
-    if (zScore <= scenario.params.zEntry) {
+    // Cooldown: skip re-entry for cooldownBars candles after the last close.
+    if (cooldownBars > 0 && lastSellCandleIndex !== undefined) {
+      if (candleIndex - lastSellCandleIndex < cooldownBars) {
+        return hold("cooldown");
+      }
+    }
+
+    if (zScore <= params.zEntry) {
       return {
         action: "buy",
         confidence: 0.54,
         reasonCodes: ["temporary-underperformance", "statistical-reversion-candidate"],
         targetWeight: 0.45,
-        stopLossPct: scenario.params.stopLossPct,
-        maxHoldCandles: scenario.params.maxHoldCandles,
+        stopLossPct: params.stopLossPct,
+        maxHoldCandles: params.maxHoldCandles,
       };
     }
 

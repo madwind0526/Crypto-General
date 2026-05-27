@@ -56,6 +56,7 @@ export interface StrategyContext {
   candles: Candle[];
   candleIndex: number;
   lastSellPrice?: number;
+  lastSellCandleIndex?: number;
   position: Position | null;
   portfolioValue: number;
 }
