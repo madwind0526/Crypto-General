@@ -395,7 +395,7 @@ function serializeCase(guideRuleMode: GuideRuleMode, autoBlockMode: SafetyMode) 
 
 function serializeMode(mode: Mode, guideRuleMode: GuideRuleMode, autoBlockMode: SafetyMode) {
   return Object.fromEntries(
-    strategies
+    [...strategies, generalSumStrategy]
       .map((strategy) => {
         const session = sessions[mode][guideRuleMode][autoBlockMode][strategy.id];
         return session ? [strategy.id, serializeResult(session.result())] : null;
