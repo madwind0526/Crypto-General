@@ -79,7 +79,7 @@ export function buildTraderOptimizationPlan(
     resolved.candidateMarketCount,
     resolved.tradeValueLookbackCandles,
     resolved.minCandles,
-  );
+  ).filter((rank) => !strategy.excludedMarkets?.has(rank.market));
 
   const optimizedMarkets = candidateMarkets
     .map((candidate, index) => {
@@ -98,8 +98,7 @@ export function buildTraderOptimizationPlan(
     .filter((result): result is MarketScenarioOptimization => result !== null)
     .sort(compareOptimizationsByPureReturn);
   const selectedMarkets = optimizedMarkets
-    .slice()
-    .sort(compareOptimizationsByPureReturn)
+    .filter((m) => m.bestResult.tradeCount > 0)
     .slice(0, resolved.monitoringMarketCount);
 
   return {
@@ -133,12 +132,10 @@ function optimizeStrategyForMarket(
 ): BacktestResult | null {
   if (candles.length === 0) return null;
   const scenarios = strategy.scenarios?.length ? strategy.scenarios : [strategy.defaultScenario];
+  if (scenarios.length === 0 || !scenarios[0]) return null;
   const results = scenarios.map((scenario) => runBacktest(strategy, scenario, candles, config));
   return results.reduce((best, current) =>
-    current.returnRate > best.returnRate ||
-    (current.returnRate === best.returnRate && scoreBacktestResult(current) > scoreBacktestResult(best))
-      ? current
-      : best,
+    scoreBacktestResult(current) > scoreBacktestResult(best) ? current : best,
   );
 }
 

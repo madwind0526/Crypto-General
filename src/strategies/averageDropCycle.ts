@@ -130,6 +130,10 @@ function getAverageTradePrices(candles: Candle[], windowCandles: number) {
     if (index < window) {
       averages.push(null);
     } else {
+      // intentional: average is computed BEFORE adding the current candle,
+      // so averages[index] reflects the prior window [index-window, index-1].
+      // this lets the stop-loss detect a sharp drop vs. the pre-drop average
+      // without the current candle's falling price diluting that average.
       averages.push(volumeSum > 0 && quoteVolumeSum > 0 ? quoteVolumeSum / volumeSum : closeSum / window);
     }
 

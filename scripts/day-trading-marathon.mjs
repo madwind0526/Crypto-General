@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const UPBIT_BASE_URL = "https://api.upbit.com";
@@ -97,6 +97,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 do {
+  if (shuttingDown) break;
   cycle += 1;
   const cycleStartedAt = Date.now();
 
@@ -179,7 +180,18 @@ async function runCycle(cycleNumber) {
   };
 
   await writeJson(cachePath, payload, true);
-  await writeJson(publicCachePath, payload, false);
+  try {
+    await writeJson(publicCachePath, payload, false);
+  } catch (err) {
+    if (err.code !== "EPERM" && err.code !== "EBUSY") throw err;
+    // Atomic rename blocked (Vite file watcher lock) — fall back to direct write
+    try {
+      await mkdir(path.dirname(publicCachePath), { recursive: true });
+      await writeFile(publicCachePath, `${JSON.stringify(payload)}\n`, "utf8");
+    } catch {
+      console.warn(`[cycle ${cycleNumber}] skipped public cache write (${err.code})`);
+    }
+  }
   console.log(`[cycle ${cycleNumber}] wrote retained cache`);
 
   await runPaperSimulation();
@@ -236,8 +248,12 @@ async function loadSelectedMarkets() {
 }
 
 async function readCache() {
-  if (!existsSync(cachePath)) return null;
-  return JSON.parse(await readFile(cachePath, "utf8"));
+  try {
+    return JSON.parse(await readFile(cachePath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[cache] readCache failed:", error.message);
+    return null;
+  }
 }
 
 async function fetchLatestOneMinuteCandles(market) {
@@ -320,7 +336,14 @@ async function maybeRunDailyRollover() {
   const currentDayStart = getKstDayStart(Date.now());
   if (currentDayStart <= lastRolloverDayStart) return;
 
-  console.log("[rollover] KST day changed. Re-optimizing plans with previous 24h data.");
+  console.log("[rollover] KST day changed. Saving daily simulation log...");
+  try {
+    await runCommand(process.execPath, [path.join(root, "scripts", "save-daily-log.mjs")]);
+  } catch (e) {
+    console.warn("[rollover] save-daily-log failed (non-fatal):", e.message);
+  }
+
+  console.log("[rollover] Re-optimizing plans with previous 24h data.");
   await runCommand(process.execPath, [path.join(root, "scripts", "daily-rollover.mjs")], {
     ROLLOVER_AT: new Date(currentDayStart).toISOString(),
   });
@@ -347,6 +370,7 @@ function runCommand(command, args, env = {}) {
       if (settled) return;
       settled = true;
       child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
       reject(new Error(`${command} ${args.join(" ")} timed out after ${childTimeoutMs / 60_000} minutes`));
     }, childTimeoutMs);
 
@@ -413,8 +437,11 @@ function getRetryDelayMs(response, attempt) {
 }
 
 async function writeJson(filePath, payload, pretty) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(payload, null, pretty ? 2 : 0)}\n`, "utf8");
+  const dir = path.dirname(filePath);
+  await mkdir(dir, { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(payload, null, pretty ? 2 : 0)}\n`, "utf8");
+  await rename(tmp, filePath);
 }
 
 async function writeStatus(status) {

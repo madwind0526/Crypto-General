@@ -273,6 +273,7 @@ export function App() {
   const [wsMode, setWsMode] = useState<"wsO" | "wsX">("wsO");
   const [wsRestarting, setWsRestarting] = useState(false);
   const lastRefreshCompletedAtRef = useRef("");
+  const lastDashboardResultsGeneratedAtRef = useRef("");
   const lastDailyMarketGeneratedAtRef = useRef("");
   const lastDailyPaperGeneratedAtRef = useRef("");
 
@@ -288,6 +289,7 @@ export function App() {
       setDashboardResults(nextResults);
       setDailyMarketData(nextDailyMarketData);
       setDailyPaperResults(nextDailyPaperResults);
+      lastDashboardResultsGeneratedAtRef.current = nextResults?.generatedAt ?? "";
       lastDailyMarketGeneratedAtRef.current = nextDailyMarketData?.generatedAt ?? "";
       lastDailyPaperGeneratedAtRef.current = nextDailyPaperResults?.generatedAt ?? "";
     });
@@ -298,27 +300,35 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    let pending = false;
 
     async function poll() {
-      const status = await loadRefreshStatus();
-      if (!active || !status) return;
-      setRefreshStatus(status);
+      if (pending) return;
+      pending = true;
+      try {
+        const status = await loadRefreshStatus();
+        if (!active || !status) return;
+        setRefreshStatus(status);
 
-      if (
-        status.completedAt &&
-        status.completedAt !== lastRefreshCompletedAtRef.current &&
-        !status.running &&
-        !status.error
-      ) {
-        lastRefreshCompletedAtRef.current = status.completedAt;
-        const [nextMarketData, nextResults, nextDailyMarketData, nextDailyPaperResults] = await loadDashboardState();
-        if (!active) return;
-        setMarketData(nextMarketData);
-        setDashboardResults(nextResults);
-        setDailyMarketData(nextDailyMarketData);
-        setDailyPaperResults(nextDailyPaperResults);
-        lastDailyMarketGeneratedAtRef.current = nextDailyMarketData?.generatedAt ?? "";
-        lastDailyPaperGeneratedAtRef.current = nextDailyPaperResults?.generatedAt ?? "";
+        if (
+          status.completedAt &&
+          status.completedAt !== lastRefreshCompletedAtRef.current &&
+          !status.running &&
+          !status.error
+        ) {
+          lastRefreshCompletedAtRef.current = status.completedAt;
+          const [nextMarketData, nextResults, nextDailyMarketData, nextDailyPaperResults] = await loadDashboardState();
+          if (!active) return;
+          setMarketData(nextMarketData);
+          setDashboardResults(nextResults);
+          setDailyMarketData(nextDailyMarketData);
+          setDailyPaperResults(nextDailyPaperResults);
+          lastDashboardResultsGeneratedAtRef.current = nextResults?.generatedAt ?? "";
+          lastDailyMarketGeneratedAtRef.current = nextDailyMarketData?.generatedAt ?? "";
+          lastDailyPaperGeneratedAtRef.current = nextDailyPaperResults?.generatedAt ?? "";
+        }
+      } finally {
+        pending = false;
       }
     }
 
@@ -332,22 +342,39 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    let pending = false;
 
     async function pollDailyOperationState() {
-      const [nextDailyMarketData, nextDailyPaperResults] = await loadDailyOperationState();
-      if (!active) return;
+      if (pending) return;
+      pending = true;
+      try {
+        const [nextResults, nextDailyMarketData, nextDailyPaperResults] = await loadDailyOperationState();
+        if (!active) return;
 
-      const nextMarketGeneratedAt = nextDailyMarketData?.generatedAt ?? "";
-      const nextPaperGeneratedAt = nextDailyPaperResults?.generatedAt ?? "";
+        // Use a monotonic sequence number to reject responses that arrive out of order.
+        const nextDashboardResultsGeneratedAt = nextResults?.generatedAt ?? "";
+        const nextMarketGeneratedAt = nextDailyMarketData?.generatedAt ?? "";
+        const nextPaperGeneratedAt = nextDailyPaperResults?.generatedAt ?? "";
 
-      if (nextMarketGeneratedAt && nextMarketGeneratedAt !== lastDailyMarketGeneratedAtRef.current) {
-        lastDailyMarketGeneratedAtRef.current = nextMarketGeneratedAt;
-        setDailyMarketData(nextDailyMarketData);
-      }
+        if (
+          nextDashboardResultsGeneratedAt &&
+          nextDashboardResultsGeneratedAt !== lastDashboardResultsGeneratedAtRef.current
+        ) {
+          lastDashboardResultsGeneratedAtRef.current = nextDashboardResultsGeneratedAt;
+          setDashboardResults(nextResults);
+        }
 
-      if (nextPaperGeneratedAt && nextPaperGeneratedAt !== lastDailyPaperGeneratedAtRef.current) {
-        lastDailyPaperGeneratedAtRef.current = nextPaperGeneratedAt;
-        setDailyPaperResults(nextDailyPaperResults);
+        if (nextMarketGeneratedAt && nextMarketGeneratedAt !== lastDailyMarketGeneratedAtRef.current) {
+          lastDailyMarketGeneratedAtRef.current = nextMarketGeneratedAt;
+          setDailyMarketData(nextDailyMarketData);
+        }
+
+        if (nextPaperGeneratedAt && nextPaperGeneratedAt !== lastDailyPaperGeneratedAtRef.current) {
+          lastDailyPaperGeneratedAtRef.current = nextPaperGeneratedAt;
+          setDailyPaperResults(nextDailyPaperResults);
+        }
+      } finally {
+        pending = false;
       }
     }
 
@@ -692,8 +719,10 @@ async function loadDashboardState(): Promise<
   return [dashboardMarketData, results, dailyOperationMarketData, dailyPaperResults];
 }
 
-async function loadDailyOperationState(): Promise<[DashboardMarketData | null, DailyPaperResultsPayload | null]> {
-  return Promise.all([loadDailyOperationMarketData(), loadDailyPaperResults()]);
+async function loadDailyOperationState(): Promise<
+  [DashboardResults | null, DashboardMarketData | null, DailyPaperResultsPayload | null]
+> {
+  return Promise.all([loadDashboardResults(), loadDailyOperationMarketData(), loadDailyPaperResults()]);
 }
 
 async function loadRefreshStatus(): Promise<StrategyRefreshStatus | null> {
@@ -1077,23 +1106,19 @@ function DailyOperationView({
     () => buildDailyEntries(plan, marketData.candlesByMarket, autoBlockMode, paperResult, operationStartAt),
     [autoBlockMode, marketData.candlesByMarket, operationStartAt, paperResult, plan],
   );
-  const displayedEntries = useMemo(() => entries.slice(0, dailyDisplayMarketCount), [entries]);
+  const displayedEntries = useMemo(
+    () => entries.slice(0, dailyDisplayMarketCount).map((entry) => ({
+      ...entry,
+      aggregated: aggregateCandles(entry.candles, chartInterval),
+    })),
+    [entries, chartInterval],
+  );
   const signals = useMemo(() => buildDailySignals(entries), [entries]);
   const operationSummary = useMemo(
     () =>
       buildDailyOperationSummary(entries, paperResult, plan, marketData.candlesByMarket, autoBlockMode, operationStartAt),
     [autoBlockMode, entries, marketData.candlesByMarket, operationStartAt, paperResult, plan],
   );
-  const decision = useMemo(
-    () =>
-      decideDailyOperation({
-        currentPosition: null,
-        now: Date.now(),
-        signals,
-      }),
-    [signals],
-  );
-
   return (
     <>
       <section className="panel daily-control-panel">
@@ -1146,9 +1171,7 @@ function DailyOperationView({
           </div>
         </div>
         <div className="watch-grid" aria-label="Daily operation markets">
-          {displayedEntries.map(({ blockedSignals, candles, currentReturn, label, market, tradeSummary, trades }) => {
-            const aggregated = aggregateCandles(candles, chartInterval);
-
+          {displayedEntries.map(({ aggregated, blockedSignals, candles, currentReturn, label, market, tradeSummary, trades }) => {
             return (
               <article
                 className="symbol-card"
@@ -1702,11 +1725,13 @@ function TrendGraph({ series, type }: { series: TrendSeries[]; type: "returns" |
     return <div className="empty-state">No trend data yet.</div>;
   }
 
-  const minTime = Math.min(...allPoints.map((point) => point.timestamp));
-  const maxTime = Math.max(...allPoints.map((point) => point.timestamp));
-  const values = allPoints.map((point) => point.value);
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
+  let minTime = Infinity, maxTime = -Infinity, minValue = Infinity, maxValue = -Infinity;
+  for (const point of allPoints) {
+    if (point.timestamp < minTime) minTime = point.timestamp;
+    if (point.timestamp > maxTime) maxTime = point.timestamp;
+    if (point.value < minValue) minValue = point.value;
+    if (point.value > maxValue) maxValue = point.value;
+  }
   const width = 900;
   const height = 320;
   const padding = {
@@ -2138,7 +2163,6 @@ function buildDailyEntries(
         result: item.bestResult,
         candles: candlesByMarket[item.market] ?? [],
       }))
-      .filter((item) => item.candles.length > 0)
       .map((item) => {
         const dayStart = operationStartAt ?? getKstDayStartForCandles(item.candles);
         const dailyCandles = filterCandlesSince(item.candles, dayStart);
@@ -2648,7 +2672,8 @@ function exportScenarioPayload(name: string, payload: unknown) {
   link.href = url;
   link.download = `${name}.json`;
   link.click();
-  URL.revokeObjectURL(url);
+  // Revoke after a short delay so the browser has time to initiate the download.
+  setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
 function buildGuidelineExportPayload() {

@@ -74,6 +74,7 @@ export interface Strategy {
   description: string;
   defaultScenario: StrategyScenario;
   scenarios?: StrategyScenario[];
+  excludedMarkets?: Set<string>;
   decide(context: StrategyContext, scenario: StrategyScenario): StrategyDecision;
 }
 
@@ -107,6 +108,7 @@ export interface Position {
   openedAt: number;
   highestPrice: number;
   holdCandles: number;
+  partialProfitTaken?: boolean;
 }
 
 export interface BacktestConfig {

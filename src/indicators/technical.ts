@@ -1,11 +1,15 @@
 import type { Candle } from "../types/trading";
 
 export function sma(values: number[], period: number): Array<number | null> {
-  return values.map((_, index) => {
-    if (index + 1 < period) return null;
-    const slice = values.slice(index + 1 - period, index + 1);
-    return slice.reduce((sum, value) => sum + value, 0) / period;
-  });
+  const result: Array<number | null> = new Array(values.length).fill(null);
+  if (period <= 0 || values.length < period) return result;
+  let windowSum = 0;
+  for (let i = 0; i < values.length; i++) {
+    windowSum += values[i];
+    if (i >= period) windowSum -= values[i - period];
+    if (i + 1 >= period) result[i] = windowSum / period;
+  }
+  return result;
 }
 
 export function ema(values: number[], period: number): Array<number | null> {
@@ -68,16 +72,23 @@ export function macd(values: number[], fast = 12, slow = 26, signal = 9) {
     const slowValue = slowEma[index];
     return fastValue === null || slowValue === null ? null : fastValue - slowValue;
   });
-  const signalLine = ema(
-    macdLine.map((value) => value ?? 0),
-    signal,
-  );
+  // Strip leading nulls so the signal EMA seed is not biased toward zero.
+  // Re-align by prepending nulls to match the original macdLine length.
+  const firstReal = macdLine.findIndex((v) => v !== null);
+  const signalAligned: Array<number | null> = new Array(macdLine.length).fill(null);
+  if (firstReal >= 0) {
+    const realValues = macdLine.slice(firstReal) as number[];
+    const signalFromReal = ema(realValues, signal);
+    for (let i = 0; i < signalFromReal.length; i++) {
+      signalAligned[firstReal + i] = signalFromReal[i];
+    }
+  }
 
   return {
     macdLine,
-    signalLine: signalLine.map((value, index) => (macdLine[index] === null ? null : value)),
+    signalLine: signalAligned,
     histogram: macdLine.map((value, index) => {
-      const signalValue = signalLine[index];
+      const signalValue = signalAligned[index];
       return value === null || signalValue === null ? null : value - signalValue;
     }),
   };

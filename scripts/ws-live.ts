@@ -46,7 +46,7 @@ interface WsStrategyResult {
   trades: number;
   cash: number;
   finalValue: number;
-  position: null;
+  position: { market: string; entryPrice: number; holdBars: number } | null;
   startedAt: number;
   endedAt: number;
 }
@@ -138,7 +138,12 @@ async function loadPlans() {
         "scenarios",
         `optimization-${guideRuleMode}.json`,
       );
-      const payload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      let payload: PlanPayload;
+      try {
+        payload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      } catch {
+        throw new Error(`ws-live: plan file not found or unreadable: ${planPath}\nRun 'npm run persist:traders' first.`);
+      }
       plans[guideRuleMode][strategy.id] = payload.plan;
     }
   }
@@ -380,12 +385,17 @@ function serializeMode(mode: Mode, guideRuleMode: GuideRuleMode, autoBlockMode: 
 }
 
 function serializeResult(result: PaperTradingResult): WsStrategyResult {
+  const lastTrade = result.trades.at(-1);
+  const openPosition =
+    lastTrade?.side === "buy"
+      ? { market: lastTrade.market, entryPrice: lastTrade.price, holdBars: 0 }
+      : null;
   return {
     returnRate: result.returnRate,
     trades: result.trades.length,
     cash: result.finalValue,
     finalValue: result.finalValue,
-    position: null,
+    position: openPosition,
     startedAt: result.startedAt,
     endedAt: result.endedAt,
   };

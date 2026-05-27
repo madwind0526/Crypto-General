@@ -63,10 +63,12 @@ export const arbitrageStrategy: Strategy = {
     if (window.length < scenario.params.lookback) return hold("warming-up");
 
     const average = window.reduce((sum, value) => sum + value, 0) / window.length;
-    const variance = window.reduce((sum, value) => sum + (value - average) ** 2, 0) / window.length;
+    // Use sample variance (n-1) for an unbiased estimator over the rolling window.
+    const variance = window.reduce((sum, value) => sum + (value - average) ** 2, 0) / (window.length - 1);
     const sd = Math.sqrt(variance);
     if (sd === 0) return hold("flat-relative-window");
 
+    // returns[candleIndex] is guaranteed non-null here because window.length >= lookback > 0.
     const zScore = (indicators.returns[candleIndex] - average) / sd;
 
     if (position) {

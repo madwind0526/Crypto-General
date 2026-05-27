@@ -29,7 +29,7 @@ export function compareStrategies(
     if (results.length === 0) return [];
 
     const bestResult = results.reduce((best, current) =>
-      compareByPureReturn(current, best) > 0 ? current : best,
+      scoreBacktestResult(current) > scoreBacktestResult(best) ? current : best,
     );
 
     return {
@@ -78,9 +78,11 @@ export function compareStrategiesByGuideMode(
 export function scoreBacktestResult(result: BacktestResult): number {
   const drawdownPenalty = result.maxDrawdown * 1.5;
   const activityPenalty = result.tradeCount < 2 ? 0.08 : 0;
-  return result.returnRate - drawdownPenalty + result.winRate * 0.05 - activityPenalty;
+  // Clamp profitFactor contribution so a single lucky trade doesn't dominate.
+  const pfBonus = Math.min(result.profitFactor, 3) * 0.03;
+  return result.returnRate - drawdownPenalty + result.winRate * 0.05 + pfBonus - activityPenalty;
 }
 
 function compareByPureReturn(current: BacktestResult, best: BacktestResult) {
-  return current.returnRate - best.returnRate || best.maxDrawdown - current.maxDrawdown || current.tradeCount - best.tradeCount;
+  return current.returnRate - best.returnRate;
 }

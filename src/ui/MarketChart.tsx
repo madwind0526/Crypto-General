@@ -237,6 +237,46 @@ export function MarketChart({
       boundaryPrimitiveRef.current = null;
       blockedSignalPrimitiveRef.current = null;
     };
+  }, [variant]);
+
+  // Apply theme colors without destroying/recreating the chart.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const series = candleSeriesRef.current;
+    if (!chart || !candleSeries) return;
+
+    const colors = getChartColors(themeMode);
+    chart.applyOptions({
+      layout: { textColor: colors.text },
+      grid: {
+        vertLines: { color: colors.grid },
+        horzLines: { color: colors.grid },
+      },
+      crosshair: {
+        horzLine: { color: colors.crosshair },
+        vertLine: { color: colors.crosshair },
+      },
+    });
+    candleSeries.applyOptions({
+      upColor: colors.up,
+      downColor: colors.down,
+      borderUpColor: colors.up,
+      borderDownColor: colors.down,
+      wickUpColor: colors.up,
+      wickDownColor: colors.down,
+    });
+    // Detach and re-attach primitives with updated theme.
+    if (series && boundaryPrimitiveRef.current && blockedSignalPrimitiveRef.current) {
+      series.detachPrimitive(boundaryPrimitiveRef.current);
+      series.detachPrimitive(blockedSignalPrimitiveRef.current);
+      const newBoundary = new DailyBoundaryPrimitive(themeMode, variant);
+      const newBlocked = new BlockedSignalPrimitive(themeMode, variant);
+      series.attachPrimitive(newBoundary);
+      series.attachPrimitive(newBlocked);
+      boundaryPrimitiveRef.current = newBoundary;
+      blockedSignalPrimitiveRef.current = newBlocked;
+    }
   }, [themeMode, variant]);
 
   useEffect(() => {

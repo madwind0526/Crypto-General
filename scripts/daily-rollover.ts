@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   buildTraderOptimizationPlan,
@@ -47,6 +47,7 @@ const publicMarketCachePath = path.join(root, "public/market/upbit-krw-1m-daily.
 const candidateMarketCount = Number(process.env.ROLLOVER_CANDIDATE_MARKET_COUNT ?? 30);
 const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 9);
 const runDashboardBuild = process.env.ROLLOVER_BUILD_DASHBOARD !== "false";
+const commandTimeoutMs = Number(process.env.ROLLOVER_COMMAND_TIMEOUT_MINUTES ?? 20) * 60 * 1000;
 const refreshTopMarkets = process.env.ROLLOVER_REFRESH_TOP30 !== "false";
 const writeMarketCache = process.env.ROLLOVER_WRITE_MARKET_CACHE !== "false";
 const requestDelayMs = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 120);
@@ -198,7 +199,7 @@ async function smoothRefitPlan(
 
   return {
     ...plan,
-    optimizedMarkets: optimizedMarkets.slice().sort(compareOptimizationsByPureReturn),
+    optimizedMarkets: rankedByReturn.slice(),
     selectedMarkets: rankedByReturn.slice(0, monitoringMarketCount),
   };
 }
@@ -469,7 +470,8 @@ async function fetchOneMinuteCandlesForWindow(market: string, start: number, end
   const all: UpbitMinuteCandle[] = [];
   let to = new Date(end).toISOString();
 
-  for (let page = 0; page < 12; page += 1) {
+  const PAGE_CAP = 12;
+  for (let page = 0; page < PAGE_CAP; page += 1) {
     const params = new URLSearchParams({
       count: "200",
       market,
@@ -482,6 +484,10 @@ async function fetchOneMinuteCandlesForWindow(market: string, start: number, end
     const oldestTimestamp = Math.min(...pageCandles.map((candle) => candle.timestamp));
     to = new Date(oldestTimestamp - 1).toISOString();
     if (oldestTimestamp <= start) break;
+
+    if (page === PAGE_CAP - 1) {
+      console.warn(`[rollover] ${market}: hit ${PAGE_CAP}-page cap fetching 1m candles; window may be incomplete`);
+    }
     await sleep(requestDelayMs);
   }
 
@@ -583,17 +589,36 @@ function runCommand(command: string, args: string[]) {
       env: process.env,
       stdio: "inherit",
     });
-    child.on("exit", (code) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+      reject(new Error(`${command} ${args.join(" ")} timed out after ${commandTimeoutMs / 60_000} minutes`));
+    }, commandTimeoutMs);
+
+    const finish = (cb: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cb();
+    };
+
+    child.on("exit", (code) => finish(() => {
       if (code === 0) resolve();
       else reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
-    });
-    child.on("error", reject);
+    }));
+    child.on("error", (error) => finish(() => reject(error)));
   });
 }
 
 async function writeJson(filePath: string, value: unknown) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const dir = path.dirname(filePath);
+  await mkdir(dir, { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await rename(tmp, filePath);
 }
 
 async function writeRolloverStatus(extra: Record<string, unknown> = {}) {

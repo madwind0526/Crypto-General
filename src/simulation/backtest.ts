@@ -55,6 +55,8 @@ export function runBacktest(
       const takeProfitTriggered = takeProfitPct > 0 && candle.high >= takeProfit;
 
       if (triggeredStops.length > 0 || takeProfitTriggered) {
+        // When multiple stops trigger on the same candle, use the highest price
+        // (trailing stop >= fixed stop by construction, so trailing always wins — intentional).
         const exitPrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
         const roundTripReturn = closePosition(exitPrice * (1 - config.slippageRate), ["risk-rule-exit"], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
@@ -124,13 +126,16 @@ export function runBacktest(
 
       if (quantity > 0) {
         cash -= budget;
+        // Include buy-side fee in cost basis so closePosition's PnL is accurate.
+        const costBasis = (quantity * fillPrice + fee) / quantity;
         position = {
           market: candle.market,
           quantity,
-          averagePrice: fillPrice,
+          averagePrice: costBasis,
           openedAt: candle.timestamp,
           highestPrice: fillPrice,
           holdCandles: 0,
+          partialProfitTaken: false,
         };
         trades.push({
           market: candle.market,
@@ -147,11 +152,15 @@ export function runBacktest(
     }
 
     if (finalAction === "sell" && position) {
+      // targetWeight in (0,1) means partial close: keep that fraction, sell the rest
+      const keepFraction =
+        decision.targetWeight > 0 && decision.targetWeight < 1 ? decision.targetWeight : undefined;
       const roundTripReturn = closePosition(
         candle.close * (1 - config.slippageRate),
         [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         candle.timestamp,
         guideRuleEvaluation,
+        keepFraction,
       );
       roundTripReturns.push(roundTripReturn);
     }
@@ -166,7 +175,13 @@ export function runBacktest(
     const last = candles[candles.length - 1];
     const roundTripReturn = closePosition(last.close * (1 - config.slippageRate), ["final-close"], last.timestamp);
     roundTripReturns.push(roundTripReturn);
-    equityCurve.push({ timestamp: last.timestamp, value: cash });
+    // Update the last equity curve point in-place rather than pushing a duplicate
+    // timestamp — the main loop already pushed the pre-close value for this candle.
+    if (equityCurve.length > 0 && equityCurve[equityCurve.length - 1].timestamp === last.timestamp) {
+      equityCurve[equityCurve.length - 1].value = cash;
+    } else {
+      equityCurve.push({ timestamp: last.timestamp, value: cash });
+    }
   }
 
   const finalValue = equityCurve[equityCurve.length - 1]?.value ?? cash;
@@ -174,6 +189,47 @@ export function runBacktest(
   const losses = roundTripReturns.filter((value) => value < 0);
   const grossProfit = wins.reduce((sum, value) => sum + value, 0);
   const grossLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+
+  function closePosition(
+    price: number,
+    reasonCodes: string[],
+    timestamp: number,
+    guideRuleEvaluation?: GuideRuleEvaluation,
+    keepFraction?: number,
+  ): number {
+    if (!position) return 0;
+
+    const isPartial = keepFraction !== undefined && keepFraction > 0 && keepFraction < 1;
+    const sellQuantity = isPartial ? position.quantity * (1 - keepFraction) : position.quantity;
+
+    const proceeds = sellQuantity * price;
+    const fee = proceeds * config.feeRate;
+    const entryCost = sellQuantity * position.averagePrice;
+    const realized = proceeds - fee - entryCost;
+
+    trades.push({
+      market: position.market,
+      side: "sell",
+      timestamp,
+      price,
+      quantity: sellQuantity,
+      fee,
+      reasonCodes,
+      guideRuleMode,
+      guideRuleEvaluation,
+    });
+    cash += proceeds - fee;
+
+    if (isPartial) {
+      position.quantity *= keepFraction;
+      position.partialProfitTaken = true;
+      return entryCost === 0 ? 0 : realized / entryCost;
+    }
+
+    lastSellPrice = price;
+    position = null;
+    return entryCost === 0 ? 0 : realized / entryCost;
+  }
 
   return {
     strategyId: strategy.id,
@@ -194,35 +250,6 @@ export function runBacktest(
     signalAudit,
     equityCurve,
   };
-
-function closePosition(
-    price: number,
-    reasonCodes: string[],
-    timestamp: number,
-    guideRuleEvaluation?: GuideRuleEvaluation,
-  ): number {
-    if (!position) return 0;
-    const proceeds = position.quantity * price;
-    const fee = proceeds * config.feeRate;
-    const entryCost = position.quantity * position.averagePrice;
-    const realized = proceeds - fee - entryCost;
-
-    trades.push({
-      market: position.market,
-      side: "sell",
-      timestamp,
-      price,
-      quantity: position.quantity,
-      fee,
-      reasonCodes,
-      guideRuleMode,
-      guideRuleEvaluation,
-    });
-    cash += proceeds - fee;
-    lastSellPrice = price;
-    position = null;
-    return entryCost === 0 ? 0 : realized / entryCost;
-  }
 }
 
 function createPassedGuideRuleEvaluation(mode: GuideRuleMode): GuideRuleEvaluation {

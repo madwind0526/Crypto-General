@@ -56,7 +56,13 @@ for (const strategy of strategies) {
   for (const guideRuleMode of guideModes) {
     for (const autoBlockMode of safetyModes) {
       const planPath = path.join(root, "data", "local", "traders", strategy.id, "scenarios", `optimization-${guideRuleMode}.json`);
-      const planPayload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      let planPayload: PlanPayload;
+      try {
+        planPayload = JSON.parse(await readFile(planPath, "utf8")) as PlanPayload;
+      } catch (error) {
+        console.warn(`[paper-sim] Skipping ${strategy.id}/${guideRuleMode}: plan file missing or unreadable (${planPath})`);
+        continue;
+      }
       const result = runPaperTradingSimulation(strategy, planPayload.plan, marketCache.candlesByMarket, {
         autoBlockMode,
         guideRuleMode,
@@ -69,11 +75,13 @@ for (const strategy of strategies) {
 
       await mkdir(outputDir, { recursive: true });
       await writeFile(path.join(outputDir, "latest-summary.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
-      await writeFile(
-        path.join(outputDir, "decisions.jsonl"),
-        result.decisions.map((decision) => JSON.stringify(decision)).join("\n") + "\n",
-        "utf8",
-      );
+      if (result.decisions.length > 0) {
+        await writeFile(
+          path.join(outputDir, "decisions.jsonl"),
+          result.decisions.map((decision) => JSON.stringify(decision)).join("\n") + "\n",
+          "utf8",
+        );
+      }
 
       rows.push(toSummaryRow(result));
       console.log(

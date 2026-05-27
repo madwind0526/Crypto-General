@@ -90,7 +90,9 @@ export const anomalyStrategy: Strategy = {
     const relativeVolume = current.volume / averageVolume;
     const isAccelerating = acceleration >= scenario.params.accelerationMin;
     const isTooExtended = extendedMove >= scenario.params.maxExtendedMove;
-    const breaksHigh = current.close >= Math.max(...indicators.closes.slice(Math.max(0, candleIndex - 24), candleIndex));
+    const prevHigh24 = indicators.rollingHigh24[candleIndex];
+    // Guard: if no prior window exists (candleIndex === 0), treat as not breaking out.
+    const breaksHigh = prevHigh24 !== null && current.close >= prevHigh24;
 
     if (relativeVolume >= scenario.params.relativeVolumeMin && isAccelerating && breaksHigh && !isTooExtended) {
       return {
@@ -115,6 +117,7 @@ function hold(reason: string): StrategyDecision {
 
 type AnomalyIndicators = {
   closes: number[];
+  rollingHigh24: Array<number | null>;
   averageVolume: Array<number | null>;
   acceleration: Array<number | null>;
   extendedMove: Array<number | null>;
@@ -135,8 +138,16 @@ function getAnomalyIndicators(candles: Candle[], scenario: StrategyScenario): An
 
   const closes = candles.map((candle) => candle.close);
   const volumes = candles.map((candle) => candle.volume);
+  // Precompute rolling 24-bar high (exclusive of current bar) to avoid O(24) spread in decide().
+  const rollingHigh24: Array<number | null> = closes.map((_, i) => {
+    if (i === 0) return null;
+    let high = -Infinity;
+    for (let j = Math.max(0, i - 24); j < i; j++) high = Math.max(high, closes[j]);
+    return high;
+  });
   const indicators = {
     closes,
+    rollingHigh24,
     averageVolume: sma(volumes, scenario.params.volumeLookback),
     acceleration: rateOfChange(closes, scenario.params.accelerationLookback),
     extendedMove: rateOfChange(closes, scenario.params.volumeLookback),

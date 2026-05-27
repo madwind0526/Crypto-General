@@ -51,6 +51,7 @@ interface CandleWarningEvaluation {
 
 const MIN_LOOKBACK = 80;
 const movingAverageCache = new WeakMap<Candle[], Map<string, MovingAverageSeries>>();
+const atrCache = new WeakMap<Candle[], Map<string, number>>();
 
 export function evaluateGuideRules({
   candleIndex,
@@ -220,7 +221,9 @@ function getMovingAverageSeries(candles: Candle[]): MovingAverageSeries {
     movingAverageCache.set(candles, byWindow);
   }
 
-  const key = `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}`;
+  // Include close of last candle in key so in-place mutations are detected.
+  const last = candles[candles.length - 1];
+  const key = `${candles.length}:${last?.timestamp ?? 0}:${last?.close ?? 0}`;
   const cached = byWindow.get(key);
   if (cached) return cached;
 
@@ -300,10 +303,21 @@ function getWindow(candles: Candle[], candleIndex: number, size: number) {
 
 function averageTrueRangePct(candles: Candle[]) {
   if (candles.length === 0) return 0;
+  let byKey = atrCache.get(candles);
+  if (!byKey) {
+    byKey = new Map();
+    atrCache.set(candles, byKey);
+  }
+  const last = candles[candles.length - 1];
+  const key = `${candles.length}:${last?.timestamp ?? 0}:${last?.close ?? 0}`;
+  const cached = byKey.get(key);
+  if (cached !== undefined) return cached;
+
   const ranges = candles.map((candle) => (candle.high - candle.low) / candle.close);
   const values = sma(ranges, Math.min(14, ranges.length)).filter((value): value is number => value !== null);
-  if (values.length === 0) return 0;
-  return values[values.length - 1];
+  const result = values.length === 0 ? 0 : values[values.length - 1];
+  byKey.set(key, result);
+  return result;
 }
 
 function clamp01(value: number) {

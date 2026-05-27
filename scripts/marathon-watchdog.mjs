@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
 const stateDir = path.join(root, "data", "local", "paper-trading-1m-daily");
+const paperPath = path.join(root, "public", "market", "paper-trading-1m-daily-results.json");
 const statusPath = path.join(stateDir, "marathon-status.json");
 const watchdogPidPath = path.join(stateDir, "marathon-watchdog.pid");
 const watchdogStatusPath = path.join(stateDir, "marathon-watchdog-status.json");
@@ -12,7 +13,7 @@ const marathonScript = path.join(root, "scripts", "day-trading-marathon.mjs");
 
 const durationMs = Number(process.env.MARATHON_DURATION_HOURS ?? 24) * 60 * 60 * 1000;
 const restartDelayMs = Number(process.env.MARATHON_RESTART_DELAY_SECONDS ?? 15) * 1000;
-const staleMs = Number(process.env.MARATHON_STALE_MINUTES ?? 45) * 60 * 1000;
+const staleMs = Number(process.env.MARATHON_STALE_MINUTES ?? 10) * 60 * 1000;
 const checkMs = Number(process.env.MARATHON_WATCHDOG_CHECK_SECONDS ?? 60) * 1000;
 const continuous = process.env.MARATHON_WATCHDOG_CONTINUOUS !== "false";
 
@@ -65,6 +66,10 @@ async function runChild(runHours, currentRunCount) {
   });
 
   return await new Promise((resolve) => {
+    // Initialize to null so any write after spawn counts as fresh,
+    // avoiding a premature stale-kill when the file already exists with the same mtime.
+    let lastSeenPaperMtime = null;
+    let lastFreshAt = Date.now();
     child = spawn(process.execPath, [marathonScript], {
       cwd: root,
       env: {
@@ -81,15 +86,42 @@ async function runChild(runHours, currentRunCount) {
       currentRunDeadline: new Date(runDeadline).toISOString(),
     }).catch((error) => console.error("[marathon-watchdog] status write failed", error));
 
+    let isChecking = false;
     const staleTimer = setInterval(async () => {
-      if (!child || stopping) return;
-      const staleFor = await getStatusStaleForMs();
+      if (isChecking || !child || stopping) return;
+      isChecking = true;
+      try {
+      const currentPaperMtime = getPaperResultMtimeMs();
+      const statusStaleFor = await getStatusStaleForMs();
+      if (
+        currentPaperMtime !== null &&
+        (lastSeenPaperMtime === null || currentPaperMtime > lastSeenPaperMtime)
+      ) {
+        lastSeenPaperMtime = currentPaperMtime;
+        lastFreshAt = Date.now();
+        await writeWatchdogStatus("running", {
+          restartCount,
+          runCount: currentRunCount,
+          childPid: child.pid,
+          currentRunHours: runHours,
+          currentRunDeadline: new Date(runDeadline).toISOString(),
+          lastSeenPaperMtime,
+          paperStaleForMs: 0,
+          statusStaleForMs: statusStaleFor,
+        });
+        return;
+      }
+      const paperStaleFor = currentPaperMtime === null ? null : Date.now() - lastFreshAt;
+      const staleFor = paperStaleFor ?? statusStaleFor;
       await writeWatchdogStatus("running", {
         restartCount,
         runCount: currentRunCount,
         currentRunHours: runHours,
         currentRunDeadline: new Date(runDeadline).toISOString(),
-        statusStaleForMs: staleFor,
+        childPid: child.pid,
+        lastSeenPaperMtime,
+        paperStaleForMs: paperStaleFor,
+        statusStaleForMs: statusStaleFor,
       });
       if (staleFor === null || staleFor < staleMs) return;
 
@@ -97,10 +129,16 @@ async function runChild(runHours, currentRunCount) {
         restartCount,
         runCount: currentRunCount,
         childPid: child.pid,
+        lastSeenPaperMtime,
+        paperStaleForMs: paperStaleFor,
+        statusStaleForMs: statusStaleFor,
         staleForMs: staleFor,
       });
       child.kill("SIGTERM");
       setTimeout(() => child?.kill("SIGKILL"), 10_000).unref();
+      } finally {
+        isChecking = false;
+      }
     }, checkMs);
 
     child.on("exit", (code, signal) => {
@@ -116,6 +154,11 @@ async function runChild(runHours, currentRunCount) {
       resolve(1);
     });
   });
+}
+
+function getPaperResultMtimeMs() {
+  if (!existsSync(paperPath)) return null;
+  return statSync(paperPath).mtimeMs;
 }
 
 async function getStatusStaleForMs() {
