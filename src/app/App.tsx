@@ -2624,10 +2624,10 @@ function formatAutoBlockModeLabel(mode: AutoBlockMode) {
   return mode === "enabled" ? "Safety O" : "Safety X";
 }
 
-function areMarketSetsEqual(left: string[] | undefined, right: string[] | undefined) {
-  if (!left || !right || left.length !== right.length) return false;
-  const leftSet = new Set(left);
-  return right.every((market) => leftSet.has(market));
+function areMarketSetsEqual(wsLiveMarkets: string[] | undefined, planMarkets: string[] | undefined) {
+  if (!wsLiveMarkets || !planMarkets || planMarkets.length === 0) return false;
+  const wsSet = new Set(wsLiveMarkets);
+  return planMarkets.every((market) => wsSet.has(market));
 }
 
 function toTrendPoint(
