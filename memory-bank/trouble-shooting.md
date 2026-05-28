@@ -4,6 +4,42 @@
 
 No known build issues after the latest implementation pass.
 
+### 2026-05-27 - Crypto-Currency dev port collided with Crypto-Anomaly
+
+Symptoms:
+- Opening `127.0.0.1:5173` showed Crypto-Anomaly, not Crypto-Currency.
+- Attempts to launch a second hidden Vite process from the sandbox were short-lived, which made browser checks confusing.
+
+Cause:
+- Crypto-Anomaly already owns the default Vite port `5173`.
+- Crypto-Currency was still using the same default dev-server port.
+
+Fix:
+- Pinned Crypto-Currency `npm run dev` to `127.0.0.1:5174` and preview to `4174`.
+- Updated the marathon watchdog to follow the working Crypto-Anomaly watchdog pattern: monitor the public paper-result file modification time, with status JSON as fallback.
+
+Verification:
+- `node --check scripts/marathon-watchdog.mjs` passed.
+- `npm run test` passed.
+- `npm run build` passed.
+
+### 2026-05-27 - Daily Operation showed fewer than 9 graphs after 00:00 reset
+
+Symptoms:
+- After the 00:00 KST rollover and rerun, a Daily Operation screen that normally showed 9 graph cards could drop to 3-7 cards.
+
+Cause:
+- The running React UI polled the refreshed 1-minute daily market cache and paper results, but it did not poll the refreshed `dashboard-results.json`.
+- After rollover, the daily cache contained today's selected-market union while the UI could still hold yesterday's 9-market plan. `buildDailyEntries` then filtered out plan markets with no matching candles, leaving only the overlapping markets.
+
+Fix:
+- Daily Operation polling now reloads `dashboard-results.json` and updates the active optimization plans when its `generatedAt` changes.
+- The 9-card board keeps selected markets visible even if candles are temporarily missing for a market.
+
+Verification:
+- `npm run test` passed.
+- `npm run build` passed.
+
 ### 2026-05-20 - Marathon run silently stopped updating
 
 Symptoms:

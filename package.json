@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview --host 127.0.0.1 --port 4174 --strictPort",
     "fetch:upbit": "node scripts/fetch-upbit-market-data.mjs",
     "fetch:upbit:top30": "node scripts/fetch-upbit-top30.mjs",
     "fetch:upbit:top30:chunk0": "node scripts/fetch-upbit-top30-chunk.mjs 0",
@@ -25,13 +25,17 @@
     "paper:marathon:day": "node scripts/day-trading-marathon.mjs",
     "paper:marathon:watchdog": "node scripts/marathon-watchdog.mjs",
     "ws:live": "node scripts/ws-live.mjs",
+    "live:trader": "node scripts/live-trader.mjs",
+    "live:trader:dry": "node scripts/live-trader.mjs --dry-run",
     "test": "vitest run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "dotenv": "^17.4.2",
     "lightweight-charts": "^5.0.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "uuid": "^14.0.0",
     "ws": "^8.20.1"
   },
   "devDependencies": {

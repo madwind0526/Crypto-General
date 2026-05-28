@@ -44,6 +44,8 @@ Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashb
 - Rollover optimization payloads now record the source cache path and optimization window. Dashboard result generation uses that path/window when rehydrating selected backtests, so a 24-hour rollover result is not accidentally recomputed over the whole retained daily cache.
 - Backtest and paper trailing stops now use the previous high-water mark before updating with the current candle high, which avoids optimistic same-candle high-before-low assumptions.
 - WS-O intraminute locks now block repeated signal evaluation for the locked minute but still allow later tick risk checks. Risk checks are scoped to the ticked market so another market's tick cannot close an open position using stale candles. Backtest risk-rule exits also apply sell slippage to match paper trading.
+- Daily Operation polling now refreshes `dashboard-results.json` along with the 1-minute daily cache and paper results. This keeps the displayed 9-market plan aligned after the 00:00 KST rollover, and the UI keeps all 9 selected cards visible even if a candle cache is briefly missing for a market.
+- Crypto-Currency's dev server is pinned to `127.0.0.1:5174` to avoid colliding with the separate Crypto-Anomaly app on `5173`. The marathon watchdog now follows the Crypto-Anomaly pattern by watching the public paper-result file mtime as the primary freshness signal, with marathon status JSON as a fallback.
 
 ## Important Assumptions
 

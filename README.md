@@ -131,6 +131,8 @@ Start the local dashboard:
 npm run dev
 ```
 
+Crypto-Currency uses `http://127.0.0.1:5174/` by default so it can run beside Crypto-Anomaly on `5173`.
+
 Build and type-check:
 
 ```bash
@@ -177,6 +179,12 @@ Start a 24-hour marathon paper simulation:
 
 ```bash
 npm run paper:marathon:day
+```
+
+Start the continuous marathon watchdog:
+
+```bash
+npm run paper:marathon:watchdog
 ```
 
 ## Data Locations

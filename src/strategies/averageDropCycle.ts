@@ -8,6 +8,23 @@ export const averageDropCycleScenario: StrategyScenario = {
   params: {
     averageWindowCandles: 5,
     entryDropPct: 0.005,
+    entryRisePct: 0,
+    avgStopPct: 0.020,
+    avgTakeProfitPct: 0.005,
+  },
+};
+
+// Rise mode: buy when price breaks ABOVE VWAP by entryRisePct (momentum/breakout entry).
+// Exit uses entry-price-based stop/take-profit (not VWAP) to avoid immediate re-exit.
+export const averageRiseCycleScenario: StrategyScenario = {
+  id: "average-rise-cycle-5m-entry-0.2-stop-2.0-take-0.5",
+  traderId: "general-e",
+  name: "5m / rise-entry-0.2% / stop-2.0% / take-0.5%",
+  description: "Buy a breakout above VWAP, exit when price drops from entry (stop) or rises further (take-profit).",
+  params: {
+    averageWindowCandles: 5,
+    entryDropPct: 0,
+    entryRisePct: 0.002,
     avgStopPct: 0.020,
     avgTakeProfitPct: 0.005,
   },
@@ -28,65 +45,82 @@ export const averageDropCycleStrategy: Strategy = {
     const averagePrice = getAverageTradePrice(candles, candleIndex, scenario.params.averageWindowCandles);
     if (averagePrice === null || averagePrice <= 0) return hold("warming-up");
 
+    const entryRisePct = (scenario.params.entryRisePct as number | undefined) ?? 0;
+    const entryDropPct = scenario.params.entryDropPct as number;
+    const isRiseMode = entryRisePct > 0;
+
     if (position) {
-      if (averagePrice <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
-        return {
-          action: "sell",
-          confidence: 0.76,
-          reasonCodes: ["average-below-entry-stop"],
-          targetWeight: 0,
-        };
+      if (isRiseMode) {
+        // Rise mode: stop/take-profit relative to entry price (not VWAP)
+        // — avoids immediate re-exit since we entered above VWAP
+        if (current.close <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["rise-stop-loss"], targetWeight: 0 };
+        }
+        if (current.close >= position.averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["rise-take-profit"], targetWeight: 0 };
+        }
+      } else {
+        // Drop mode: VWAP-based stop/take-profit (original logic)
+        if (averagePrice <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["average-below-entry-stop"], targetWeight: 0 };
+        }
+        if (current.close >= averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["price-above-average-take-profit"], targetWeight: 0 };
+        }
       }
-
-      if (current.close >= averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
-        return {
-          action: "sell",
-          confidence: 0.72,
-          reasonCodes: ["price-above-average-take-profit"],
-          targetWeight: 0,
-        };
-      }
-
       return hold("average-cycle-position-running");
     }
 
-    if (current.close <= averagePrice * (1 - scenario.params.entryDropPct)) {
+    // Rise entry: price broke above VWAP (momentum/breakout)
+    if (isRiseMode && current.close >= averagePrice * (1 + entryRisePct)) {
       return {
         action: "buy",
-        confidence: Math.min(0.9, 0.55 + scenario.params.entryDropPct * 5),
+        confidence: Math.min(0.9, 0.55 + entryRisePct * 5),
+        reasonCodes: ["price-above-average-entry"],
+        targetWeight: 0.65,
+      };
+    }
+
+    // Drop entry: price fell below VWAP
+    if (!isRiseMode && entryDropPct > 0 && current.close <= averagePrice * (1 - entryDropPct)) {
+      return {
+        action: "buy",
+        confidence: Math.min(0.9, 0.55 + entryDropPct * 5),
         reasonCodes: ["price-below-average-entry"],
         targetWeight: 0.65,
       };
     }
 
-    return hold("waiting-average-drop");
+    return hold("waiting-average-signal");
   },
 };
 
 function buildAverageDropCycleScenarios() {
   const scenarios: StrategyScenario[] = [];
-  const averageWindows = [5, 10, 30, 60];
-  // Narrowed ranges: 0.5–2% in 0.5% steps
-  const halfPctSteps = [0.5, 1.0, 1.5, 2.0];
+  const averageWindows = [5, 10, 30, 60];                          // 4
+  const entryPcts   = [0.01, 0.02, 0.03, 0.04, 0.05];             // 5 (1–5%)
+  const stopPcts    = [0, 0.01, 0.02, 0.03, 0.04, 0.05];          // 6 (0–5%, 0=disabled)
+  const takePcts    = [0.01, 0.02, 0.03, 0.04, 0.05];             // 5 (1–5%)
+  // Total: 4 × 5 × 6 × 5 = 600 scenarios
 
   for (const averageWindowCandles of averageWindows) {
-    for (const entryDrop of halfPctSteps) {
-      for (const avgStop of halfPctSteps) {
-        for (const avgTake of halfPctSteps) {
-          const e = entryDrop.toFixed(1);
-          const s = avgStop.toFixed(1);
-          const t = avgTake.toFixed(1);
+    for (const entryDropPct of entryPcts) {
+      for (const avgStopPct of stopPcts) {
+        for (const avgTakeProfitPct of takePcts) {
+          const p = (entryDropPct * 100).toFixed(0);
+          const s = (avgStopPct * 100).toFixed(0);
+          const t = (avgTakeProfitPct * 100).toFixed(0);
           scenarios.push({
-            id: `average-drop-cycle-${averageWindowCandles}m-entry-${e}-stop-${s}-take-${t}`,
+            id: `average-drop-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
             traderId: "general-e",
-            name: `${averageWindowCandles}m / entry-${e}% / stop-${s}% / take-${t}%`,
-            description:
-              "Parameter split for General-E using 0.5–2% narrowed ranges in 0.5% steps.",
+            name: `${averageWindowCandles}m / drop-${p}% / stop-${s}% / take-${t}%`,
+            description: "Drop mode: buy when price falls below VWAP.",
             params: {
               averageWindowCandles,
-              entryDropPct: entryDrop / 100,
-              avgStopPct: avgStop / 100,
-              avgTakeProfitPct: avgTake / 100,
+              entryDropPct,
+              entryRisePct: 0,
+              avgStopPct,
+              avgTakeProfitPct,
             },
           });
         }

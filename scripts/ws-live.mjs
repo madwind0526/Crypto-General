@@ -1,4 +1,4 @@
-import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+import { createRequire } from "module"; const require = createRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4623,15 +4623,29 @@ function getMutableCandleCacheKey(candles, scenario) {
 
 // src/strategies/averageDropCycle.ts
 var averageDropCycleScenario = {
-  id: "average-drop-cycle-5m-3-5-3",
+  id: "average-drop-cycle-5m-entry-0.5-stop-2.0-take-0.5",
   traderId: "general-e",
-  name: "5m avg drop cycle",
+  name: "5m / entry-0.5% / stop-2.0% / take-0.5%",
   description: "Buy a drop from recent average price, then sell by average-based stop or take-profit.",
   params: {
     averageWindowCandles: 5,
-    entryDropPct: 0.03,
-    avgStopPct: 0.05,
-    avgTakeProfitPct: 0.03
+    entryDropPct: 5e-3,
+    entryRisePct: 0,
+    avgStopPct: 0.02,
+    avgTakeProfitPct: 5e-3
+  }
+};
+var averageRiseCycleScenario = {
+  id: "average-rise-cycle-5m-entry-0.2-stop-2.0-take-0.5",
+  traderId: "general-e",
+  name: "5m / rise-entry-0.2% / stop-2.0% / take-0.5%",
+  description: "Buy a breakout above VWAP, exit when price drops from entry (stop) or rises further (take-profit).",
+  params: {
+    averageWindowCandles: 5,
+    entryDropPct: 0,
+    entryRisePct: 2e-3,
+    avgStopPct: 0.02,
+    avgTakeProfitPct: 5e-3
   }
 };
 var averageDropCycleScenarios = buildAverageDropCycleScenarios();
@@ -4646,56 +4660,81 @@ var averageDropCycleStrategy = {
     const current = candles[candleIndex];
     const averagePrice = getAverageTradePrice(candles, candleIndex, scenario.params.averageWindowCandles);
     if (averagePrice === null || averagePrice <= 0) return hold2("warming-up");
+    const entryRisePct = scenario.params.entryRisePct ?? 0;
+    const entryDropPct = scenario.params.entryDropPct;
+    const isRiseMode = entryRisePct > 0;
     if (position) {
-      if (averagePrice <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
-        return {
-          action: "sell",
-          confidence: 0.76,
-          reasonCodes: ["average-below-entry-stop"],
-          targetWeight: 0
-        };
-      }
-      if (current.close >= averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
-        return {
-          action: "sell",
-          confidence: 0.72,
-          reasonCodes: ["price-above-average-take-profit"],
-          targetWeight: 0
-        };
+      if (isRiseMode) {
+        if (current.close <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["rise-stop-loss"], targetWeight: 0 };
+        }
+        if (current.close >= position.averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["rise-take-profit"], targetWeight: 0 };
+        }
+      } else {
+        if (averagePrice <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["average-below-entry-stop"], targetWeight: 0 };
+        }
+        if (current.close >= averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["price-above-average-take-profit"], targetWeight: 0 };
+        }
       }
       return hold2("average-cycle-position-running");
     }
-    if (current.close <= averagePrice * (1 - scenario.params.entryDropPct)) {
+    if (isRiseMode && current.close >= averagePrice * (1 + entryRisePct)) {
       return {
         action: "buy",
-        confidence: Math.min(0.9, 0.55 + scenario.params.entryDropPct * 5),
+        confidence: Math.min(0.9, 0.55 + entryRisePct * 5),
+        reasonCodes: ["price-above-average-entry"],
+        targetWeight: 0.65
+      };
+    }
+    if (!isRiseMode && entryDropPct > 0 && current.close <= averagePrice * (1 - entryDropPct)) {
+      return {
+        action: "buy",
+        confidence: Math.min(0.9, 0.55 + entryDropPct * 5),
         reasonCodes: ["price-below-average-entry"],
         targetWeight: 0.65
       };
     }
-    return hold2("waiting-average-drop");
+    return hold2("waiting-average-signal");
   }
 };
 function buildAverageDropCycleScenarios() {
   const scenarios = [];
   const averageWindows = [5, 10, 30, 60];
+  const halfPctSteps = [0.5, 1, 1.5, 2];
   for (const averageWindowCandles of averageWindows) {
-    for (let entryDropPct = 1; entryDropPct <= 5; entryDropPct += 1) {
-      for (let avgStopPct = 0; avgStopPct <= 5; avgStopPct += 1) {
-        for (let avgTakeProfitPct = 1; avgTakeProfitPct <= 5; avgTakeProfitPct += 1) {
+    for (const pct of halfPctSteps) {
+      for (const avgStop of halfPctSteps) {
+        for (const avgTake of halfPctSteps) {
+          const p = pct.toFixed(1);
+          const s = avgStop.toFixed(1);
+          const t = avgTake.toFixed(1);
           scenarios.push({
-            id: `average-drop-cycle-${averageWindowCandles}m-entry-${entryDropPct}-stop-${avgStopPct}-take-${avgTakeProfitPct}`,
+            id: `average-drop-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
             traderId: "general-e",
-            name: `${averageWindowCandles}m avg / ${formatDropThreshold(entryDropPct, 5)} entry / ${formatDropThreshold(
-              avgStopPct,
-              5
-            )} stop / ${formatRiseThreshold(avgTakeProfitPct, 5)} take`,
-            description: "Parameter split for General-E average drop cycle using selected minute windows and one-percent threshold steps.",
+            name: `${averageWindowCandles}m / drop-${p}% / stop-${s}% / take-${t}%`,
+            description: "Drop mode: buy when price falls below VWAP.",
             params: {
               averageWindowCandles,
-              entryDropPct: entryDropPct / 100,
-              avgStopPct: avgStopPct / 100,
-              avgTakeProfitPct: avgTakeProfitPct / 100
+              entryDropPct: pct / 100,
+              entryRisePct: 0,
+              avgStopPct: avgStop / 100,
+              avgTakeProfitPct: avgTake / 100
+            }
+          });
+          scenarios.push({
+            id: `average-rise-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
+            traderId: "general-e",
+            name: `${averageWindowCandles}m / rise-${p}% / stop-${s}% / take-${t}%`,
+            description: "Rise mode: buy when price breaks above VWAP (momentum/breakout entry).",
+            params: {
+              averageWindowCandles,
+              entryDropPct: 0,
+              entryRisePct: pct / 100,
+              avgStopPct: avgStop / 100,
+              avgTakeProfitPct: avgTake / 100
             }
           });
         }
@@ -4703,12 +4742,6 @@ function buildAverageDropCycleScenarios() {
     }
   }
   return scenarios;
-}
-function formatDropThreshold(value, maxValue) {
-  return value >= maxValue ? `<= -${value}%` : `-${value}%`;
-}
-function formatRiseThreshold(value, maxValue) {
-  return value >= maxValue ? `>= +${value}%` : `+${value}%`;
 }
 function getAverageTradePrice(candles, candleIndex, windowCandles) {
   return getAverageTradePrices(candles, windowCandles)[candleIndex] ?? null;
@@ -4750,6 +4783,258 @@ function getAverageTradePrices(candles, windowCandles) {
 }
 function hold2(reason) {
   return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
+}
+
+// src/strategies/rangeGrid.ts
+var rangeGridScenario = {
+  id: "range-grid-default",
+  traderId: "range-grid",
+  name: "Bollinger range grid",
+  description: "Sideways-market Bollinger lower-band entry with mean-reversion exit.",
+  params: {
+    period: 20,
+    deviations: 2,
+    rsiPeriod: 14,
+    rsiMaxEntry: 38,
+    bandWidthMax: 0.08,
+    stopLossPct: 0.04,
+    takeProfitPct: 0.035,
+    maxHoldCandles: 36,
+    minProfitPct: 5e-3
+    // exit only when return >= 0.5% (time-based exit always fires)
+  }
+};
+var rangeGridScenarios = [
+  {
+    ...rangeGridScenario,
+    id: "range-grid-balanced",
+    name: "Balanced range grid"
+  },
+  {
+    ...rangeGridScenario,
+    id: "range-grid-tight",
+    name: "Tight range grid",
+    params: {
+      ...rangeGridScenario.params,
+      deviations: 1.8,
+      rsiMaxEntry: 42,
+      bandWidthMax: 0.055,
+      takeProfitPct: 0.025,
+      stopLossPct: 0.03,
+      maxHoldCandles: 24
+    }
+  },
+  {
+    ...rangeGridScenario,
+    id: "range-grid-deep",
+    name: "Deep oversold grid",
+    params: {
+      ...rangeGridScenario.params,
+      deviations: 2.3,
+      rsiMaxEntry: 32,
+      bandWidthMax: 0.1,
+      takeProfitPct: 0.05,
+      stopLossPct: 0.055,
+      maxHoldCandles: 48
+    }
+  }
+];
+var rangeGridStrategy = {
+  id: "range-grid",
+  name: "Range / Grid Mean Reversion",
+  description: "\uD6A1\uBCF4\uC7A5\uC5D0\uC11C\uB294 \uACFC\uB9E4\uB3C4 \uAD6C\uAC04\uC744 \uC0AC\uACE0 \uD3C9\uADE0 \uD68C\uADC0 \uC2DC \uCCAD\uC0B0\uD569\uB2C8\uB2E4.",
+  defaultScenario: rangeGridScenario,
+  scenarios: rangeGridScenarios,
+  decide(context, scenario = rangeGridScenario) {
+    const { candles, candleIndex, position } = context;
+    const current = candles[candleIndex];
+    const indicators = getRangeGridIndicators(candles, scenario);
+    const band = indicators.bands[candleIndex];
+    const currentRsi = indicators.rsiValues[candleIndex];
+    if (band == null || currentRsi === null) return hold3("warming-up");
+    if (position) {
+      const isTimeExit = position.holdCandles >= scenario.params.maxHoldCandles;
+      const isMeanReversionExit = current.close >= band.middle;
+      if (isTimeExit || isMeanReversionExit) {
+        const minProfitPct = scenario.params.minProfitPct ?? 0;
+        const returnPct = (current.close - position.averagePrice) / position.averagePrice;
+        if (!isTimeExit && minProfitPct > 0 && returnPct < minProfitPct) {
+          return hold3("min-profit-wait");
+        }
+        return { action: "sell", confidence: 0.66, reasonCodes: ["mean-reversion-exit"], targetWeight: 0 };
+      }
+      return hold3("range-position-running");
+    }
+    const isSideways = band.widthPct <= scenario.params.bandWidthMax;
+    const isOversold = current.close <= band.lower && currentRsi <= scenario.params.rsiMaxEntry;
+    if (isSideways && isOversold) {
+      return {
+        action: "buy",
+        confidence: 0.64,
+        reasonCodes: ["sideways-regime", "lower-band-touch", "rsi-oversold"],
+        targetWeight: 0.65,
+        stopLossPct: scenario.params.stopLossPct,
+        takeProfitPct: scenario.params.takeProfitPct,
+        maxHoldCandles: scenario.params.maxHoldCandles
+      };
+    }
+    return hold3("no-range-entry");
+  }
+};
+function hold3(reason) {
+  return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
+}
+var rangeGridIndicatorCache = /* @__PURE__ */ new WeakMap();
+function getRangeGridIndicators(candles, scenario) {
+  let scenarioCache = rangeGridIndicatorCache.get(candles);
+  if (!scenarioCache) {
+    scenarioCache = /* @__PURE__ */ new Map();
+    rangeGridIndicatorCache.set(candles, scenarioCache);
+  }
+  const key = getMutableCandleCacheKey2(candles, scenario);
+  const cached = scenarioCache.get(key);
+  if (cached) return cached;
+  const closes = candles.map((candle) => candle.close);
+  const indicators = {
+    bands: bollinger(closes, scenario.params.period, scenario.params.deviations),
+    rsiValues: rsi(closes, scenario.params.rsiPeriod)
+  };
+  scenarioCache.set(key, indicators);
+  return indicators;
+}
+function getMutableCandleCacheKey2(candles, scenario) {
+  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
+}
+
+// src/strategies/generalSum.ts
+var generalSumScenario = {
+  id: "general-sum-balanced",
+  traderId: "general-sum",
+  name: "Balanced regime router",
+  description: "\uCF54\uC778\uBCC4 \uCD94\uC138\uB97C \uAC10\uC9C0\uD558\uACE0 \uC0C1\uC2B9(A)/\uD6A1\uBCF4(B)/\uACFC\uB9E4\uB3C4(E)/\uD3C9\uADE0\uD68C\uADC0(C) \uC804\uB7B5\uC73C\uB85C \uC790\uB3D9 \uB77C\uC6B0\uD305\uD569\uB2C8\uB2E4.",
+  params: {
+    fastEma: 12,
+    slowEma: 48,
+    rsiPeriod: 14,
+    bollPeriod: 20,
+    bollDeviations: 2,
+    trendSlopeLookback: 12,
+    uptrendSlopePct: 8e-3,
+    downtrendSlopePct: 8e-3,
+    sidewaysBandWidthMax: 0.07,
+    oversoldRsiMax: 35
+  }
+};
+var generalSumScenarios = [
+  generalSumScenario,
+  {
+    ...generalSumScenario,
+    id: "general-sum-sensitive",
+    name: "Sensitive regime router",
+    params: {
+      ...generalSumScenario.params,
+      fastEma: 8,
+      slowEma: 34,
+      trendSlopeLookback: 8,
+      uptrendSlopePct: 5e-3,
+      downtrendSlopePct: 5e-3,
+      sidewaysBandWidthMax: 0.08,
+      oversoldRsiMax: 38
+    }
+  },
+  {
+    ...generalSumScenario,
+    id: "general-sum-conservative",
+    name: "Conservative regime router",
+    params: {
+      ...generalSumScenario.params,
+      fastEma: 20,
+      slowEma: 60,
+      trendSlopeLookback: 20,
+      uptrendSlopePct: 0.012,
+      downtrendSlopePct: 0.012,
+      sidewaysBandWidthMax: 0.06,
+      oversoldRsiMax: 30
+    }
+  }
+];
+var generalSumStrategy = {
+  id: "general-sum",
+  name: "General-Sum Regime Router",
+  description: "\uCF54\uC778\uBCC4\uB85C \uD604\uC7AC \uCD94\uC138(\uC0C1\uC2B9/\uD6A1\uBCF4/\uACFC\uB9E4\uB3C4/\uD3C9\uADE0\uD68C\uADC0/\uD558\uB77D)\uB97C \uAC10\uC9C0\uD558\uACE0 \uAC00\uC7A5 \uC801\uD569\uD55C \uC804\uB7B5(A~E)\uC73C\uB85C \uC790\uB3D9 \uC804\uD658\uD569\uB2C8\uB2E4. \uCF54\uC778 \uC120\uD0DD\uC740 \uC5EC\uB7EC \uC804\uB7B5\uC5D0 \uC911\uBCF5 \uB4F1\uC7A5\uD55C \uC885\uBAA9\uC744 \uC6B0\uC120\uD569\uB2C8\uB2E4.",
+  defaultScenario: generalSumScenario,
+  scenarios: generalSumScenarios,
+  decide(context, scenario = generalSumScenario) {
+    const { candles, candleIndex, position } = context;
+    const params = scenario.params;
+    const indicators = getSumIndicators(candles, scenario);
+    const fast = indicators.fast[candleIndex];
+    const slow = indicators.slow[candleIndex];
+    const slowPrev = indicators.slow[Math.max(0, candleIndex - params.trendSlopeLookback)];
+    const band = indicators.bands[candleIndex];
+    const currentRsi = indicators.rsiValues[candleIndex];
+    if (fast === null || slow === null || slowPrev === null || slowPrev === 0 || band === null || currentRsi === null) {
+      return hold4("warming-up");
+    }
+    const slowSlope = (slow - slowPrev) / slowPrev;
+    const regime = detectRegime(fast, slow, slowSlope, band.widthPct, currentRsi, params);
+    if (regime === "downtrend") {
+      if (position) {
+        return { action: "sell", confidence: 0.72, reasonCodes: ["sum-downtrend-exit"], targetWeight: 0 };
+      }
+      return hold4("sum-downtrend-blocked");
+    }
+    const sub = getSubStrategyForRegime(regime);
+    const decision = sub.strategy.decide(context, sub.scenario);
+    return {
+      ...decision,
+      reasonCodes: [...decision.reasonCodes, `sum-regime:${regime}`]
+    };
+  }
+};
+function detectRegime(fast, slow, slowSlope, bandWidthPct, currentRsi, params) {
+  const { uptrendSlopePct, downtrendSlopePct, sidewaysBandWidthMax, oversoldRsiMax } = params;
+  if (currentRsi <= oversoldRsiMax) return "oversold";
+  if (fast > slow && slowSlope >= uptrendSlopePct) return "uptrend";
+  if (fast < slow && slowSlope <= -downtrendSlopePct) return "downtrend";
+  if (bandWidthPct <= sidewaysBandWidthMax && Math.abs(slowSlope) < uptrendSlopePct) return "sideways";
+  return "mean-reversion";
+}
+function getSubStrategyForRegime(regime) {
+  switch (regime) {
+    case "uptrend":
+      return { strategy: averageDropCycleStrategy, scenario: averageRiseCycleScenario };
+    case "sideways":
+      return { strategy: rangeGridStrategy, scenario: rangeGridScenario };
+    case "oversold":
+      return { strategy: averageDropCycleStrategy, scenario: averageDropCycleScenario };
+    case "mean-reversion":
+    default:
+      return { strategy: arbitrageStrategy, scenario: arbitrageScenario };
+  }
+}
+function hold4(reason) {
+  return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
+}
+var sumIndicatorCache = /* @__PURE__ */ new WeakMap();
+function getSumIndicators(candles, scenario) {
+  let scenarioCache = sumIndicatorCache.get(candles);
+  if (!scenarioCache) {
+    scenarioCache = /* @__PURE__ */ new Map();
+    sumIndicatorCache.set(candles, scenarioCache);
+  }
+  const key = `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
+  const cached = scenarioCache.get(key);
+  if (cached) return cached;
+  const closes = candles.map((c) => c.close);
+  const indicators = {
+    fast: ema(closes, scenario.params.fastEma),
+    slow: ema(closes, scenario.params.slowEma),
+    bands: bollinger(closes, scenario.params.bollPeriod, scenario.params.bollDeviations),
+    rsiValues: rsi(closes, scenario.params.rsiPeriod)
+  };
+  scenarioCache.set(key, indicators);
+  return indicators;
 }
 
 // src/strategies/momentum.ts
@@ -4961,7 +5246,7 @@ var momentumStrategy = {
   excludedMarkets: EXCLUDED_MARKETS,
   decide(context, scenario = momentumScenario) {
     if (EXCLUDED_MARKETS.has(context.market)) {
-      return hold3("excluded-market");
+      return hold5("excluded-market");
     }
     const { candles, candleIndex, position } = context;
     const params = scenario.params;
@@ -4979,7 +5264,7 @@ var momentumStrategy = {
     );
     const averageVolume = volumeWindow.length === 0 ? current.volume : volumeWindow.reduce((sum, value) => sum + value, 0) / volumeWindow.length;
     if (fast === null || slow === null || currentRsi === null || currentMacd === null || currentAtr === null) {
-      return hold3("warming-up");
+      return hold5("warming-up");
     }
     const atrPct = currentAtr / current.close;
     const exitRsiMin = params.exitRsiMin ?? 48;
@@ -4999,14 +5284,14 @@ var momentumStrategy = {
       }
       const minHoldBars = params.minHoldBars ?? 0;
       if (position.holdCandles < minHoldBars) {
-        return hold3("min-hold-period");
+        return hold5("min-hold-period");
       }
       const trendFailed = fast < slow || current.close < fast * (1 - exitEmaBuffer);
       const momentumFailed = currentRsi < exitRsiMin;
       if (trendFailed || momentumFailed) {
         return sell(["momentum-exit", trendFailed ? "trend-failed" : "momentum-failed"]);
       }
-      return hold3("position-running");
+      return hold5("position-running");
     }
     const volumeConfirmed = current.volume >= averageVolume * params.volumeMultiplier;
     const uptrend = fast > slow && current.close > slow;
@@ -5039,10 +5324,10 @@ var momentumStrategy = {
         };
       }
     }
-    return hold3("no-entry");
+    return hold5("no-entry");
   }
 };
-function hold3(reason) {
+function hold5(reason) {
   return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
 }
 function sell(reasonCodes) {
@@ -5055,7 +5340,7 @@ function getMomentumIndicators(candles, scenario) {
     scenarioCache = /* @__PURE__ */ new Map();
     momentumIndicatorCache.set(candles, scenarioCache);
   }
-  const key = getMutableCandleCacheKey2(candles, scenario);
+  const key = getMutableCandleCacheKey3(candles, scenario);
   const cached = scenarioCache.get(key);
   if (cached) return cached;
   const closes = candles.map((candle) => candle.close);
@@ -5073,260 +5358,8 @@ function getMomentumIndicators(candles, scenario) {
   scenarioCache.set(key, indicators);
   return indicators;
 }
-function getMutableCandleCacheKey2(candles, scenario) {
-  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
-}
-
-// src/strategies/rangeGrid.ts
-var rangeGridScenario = {
-  id: "range-grid-default",
-  traderId: "range-grid",
-  name: "Bollinger range grid",
-  description: "Sideways-market Bollinger lower-band entry with mean-reversion exit.",
-  params: {
-    period: 20,
-    deviations: 2,
-    rsiPeriod: 14,
-    rsiMaxEntry: 38,
-    bandWidthMax: 0.08,
-    stopLossPct: 0.04,
-    takeProfitPct: 0.035,
-    maxHoldCandles: 36,
-    minProfitPct: 5e-3
-    // exit only when return >= 0.5% (time-based exit always fires)
-  }
-};
-var rangeGridScenarios = [
-  {
-    ...rangeGridScenario,
-    id: "range-grid-balanced",
-    name: "Balanced range grid"
-  },
-  {
-    ...rangeGridScenario,
-    id: "range-grid-tight",
-    name: "Tight range grid",
-    params: {
-      ...rangeGridScenario.params,
-      deviations: 1.8,
-      rsiMaxEntry: 42,
-      bandWidthMax: 0.055,
-      takeProfitPct: 0.025,
-      stopLossPct: 0.03,
-      maxHoldCandles: 24
-    }
-  },
-  {
-    ...rangeGridScenario,
-    id: "range-grid-deep",
-    name: "Deep oversold grid",
-    params: {
-      ...rangeGridScenario.params,
-      deviations: 2.3,
-      rsiMaxEntry: 32,
-      bandWidthMax: 0.1,
-      takeProfitPct: 0.05,
-      stopLossPct: 0.055,
-      maxHoldCandles: 48
-    }
-  }
-];
-var rangeGridStrategy = {
-  id: "range-grid",
-  name: "Range / Grid Mean Reversion",
-  description: "\uD6A1\uBCF4\uC7A5\uC5D0\uC11C\uB294 \uACFC\uB9E4\uB3C4 \uAD6C\uAC04\uC744 \uC0AC\uACE0 \uD3C9\uADE0 \uD68C\uADC0 \uC2DC \uCCAD\uC0B0\uD569\uB2C8\uB2E4.",
-  defaultScenario: rangeGridScenario,
-  scenarios: rangeGridScenarios,
-  decide(context, scenario = rangeGridScenario) {
-    const { candles, candleIndex, position } = context;
-    const current = candles[candleIndex];
-    const indicators = getRangeGridIndicators(candles, scenario);
-    const band = indicators.bands[candleIndex];
-    const currentRsi = indicators.rsiValues[candleIndex];
-    if (band == null || currentRsi === null) return hold4("warming-up");
-    if (position) {
-      const isTimeExit = position.holdCandles >= scenario.params.maxHoldCandles;
-      const isMeanReversionExit = current.close >= band.middle;
-      if (isTimeExit || isMeanReversionExit) {
-        const minProfitPct = scenario.params.minProfitPct ?? 0;
-        const returnPct = (current.close - position.averagePrice) / position.averagePrice;
-        if (!isTimeExit && minProfitPct > 0 && returnPct < minProfitPct) {
-          return hold4("min-profit-wait");
-        }
-        return { action: "sell", confidence: 0.66, reasonCodes: ["mean-reversion-exit"], targetWeight: 0 };
-      }
-      return hold4("range-position-running");
-    }
-    const isSideways = band.widthPct <= scenario.params.bandWidthMax;
-    const isOversold = current.close <= band.lower && currentRsi <= scenario.params.rsiMaxEntry;
-    if (isSideways && isOversold) {
-      return {
-        action: "buy",
-        confidence: 0.64,
-        reasonCodes: ["sideways-regime", "lower-band-touch", "rsi-oversold"],
-        targetWeight: 0.65,
-        stopLossPct: scenario.params.stopLossPct,
-        takeProfitPct: scenario.params.takeProfitPct,
-        maxHoldCandles: scenario.params.maxHoldCandles
-      };
-    }
-    return hold4("no-range-entry");
-  }
-};
-function hold4(reason) {
-  return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
-}
-var rangeGridIndicatorCache = /* @__PURE__ */ new WeakMap();
-function getRangeGridIndicators(candles, scenario) {
-  let scenarioCache = rangeGridIndicatorCache.get(candles);
-  if (!scenarioCache) {
-    scenarioCache = /* @__PURE__ */ new Map();
-    rangeGridIndicatorCache.set(candles, scenarioCache);
-  }
-  const key = getMutableCandleCacheKey3(candles, scenario);
-  const cached = scenarioCache.get(key);
-  if (cached) return cached;
-  const closes = candles.map((candle) => candle.close);
-  const indicators = {
-    bands: bollinger(closes, scenario.params.period, scenario.params.deviations),
-    rsiValues: rsi(closes, scenario.params.rsiPeriod)
-  };
-  scenarioCache.set(key, indicators);
-  return indicators;
-}
 function getMutableCandleCacheKey3(candles, scenario) {
   return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
-}
-
-// src/strategies/generalSum.ts
-var generalSumScenario = {
-  id: "general-sum-balanced",
-  traderId: "general-sum",
-  name: "Balanced regime router",
-  description: "\uCF54\uC778\uBCC4 \uCD94\uC138\uB97C \uAC10\uC9C0\uD558\uACE0 \uC0C1\uC2B9(A)/\uD6A1\uBCF4(B)/\uACFC\uB9E4\uB3C4(E)/\uD3C9\uADE0\uD68C\uADC0(C) \uC804\uB7B5\uC73C\uB85C \uC790\uB3D9 \uB77C\uC6B0\uD305\uD569\uB2C8\uB2E4.",
-  params: {
-    fastEma: 12,
-    slowEma: 48,
-    rsiPeriod: 14,
-    bollPeriod: 20,
-    bollDeviations: 2,
-    trendSlopeLookback: 12,
-    uptrendSlopePct: 8e-3,
-    downtrendSlopePct: 8e-3,
-    sidewaysBandWidthMax: 0.07,
-    oversoldRsiMax: 35
-  }
-};
-var generalSumScenarios = [
-  generalSumScenario,
-  {
-    ...generalSumScenario,
-    id: "general-sum-sensitive",
-    name: "Sensitive regime router",
-    params: {
-      ...generalSumScenario.params,
-      fastEma: 8,
-      slowEma: 34,
-      trendSlopeLookback: 8,
-      uptrendSlopePct: 5e-3,
-      downtrendSlopePct: 5e-3,
-      sidewaysBandWidthMax: 0.08,
-      oversoldRsiMax: 38
-    }
-  },
-  {
-    ...generalSumScenario,
-    id: "general-sum-conservative",
-    name: "Conservative regime router",
-    params: {
-      ...generalSumScenario.params,
-      fastEma: 20,
-      slowEma: 60,
-      trendSlopeLookback: 20,
-      uptrendSlopePct: 0.012,
-      downtrendSlopePct: 0.012,
-      sidewaysBandWidthMax: 0.06,
-      oversoldRsiMax: 30
-    }
-  }
-];
-var generalSumStrategy = {
-  id: "general-sum",
-  name: "General-Sum Regime Router",
-  description: "\uCF54\uC778\uBCC4\uB85C \uD604\uC7AC \uCD94\uC138(\uC0C1\uC2B9/\uD6A1\uBCF4/\uACFC\uB9E4\uB3C4/\uD3C9\uADE0\uD68C\uADC0/\uD558\uB77D)\uB97C \uAC10\uC9C0\uD558\uACE0 \uAC00\uC7A5 \uC801\uD569\uD55C \uC804\uB7B5(A~E)\uC73C\uB85C \uC790\uB3D9 \uC804\uD658\uD569\uB2C8\uB2E4. \uCF54\uC778 \uC120\uD0DD\uC740 \uC5EC\uB7EC \uC804\uB7B5\uC5D0 \uC911\uBCF5 \uB4F1\uC7A5\uD55C \uC885\uBAA9\uC744 \uC6B0\uC120\uD569\uB2C8\uB2E4.",
-  defaultScenario: generalSumScenario,
-  scenarios: generalSumScenarios,
-  decide(context, scenario = generalSumScenario) {
-    const { candles, candleIndex, position } = context;
-    const params = scenario.params;
-    const indicators = getSumIndicators(candles, scenario);
-    const fast = indicators.fast[candleIndex];
-    const slow = indicators.slow[candleIndex];
-    const slowPrev = indicators.slow[Math.max(0, candleIndex - params.trendSlopeLookback)];
-    const band = indicators.bands[candleIndex];
-    const currentRsi = indicators.rsiValues[candleIndex];
-    if (fast === null || slow === null || slowPrev === null || slowPrev === 0 || band === null || currentRsi === null) {
-      return hold5("warming-up");
-    }
-    const slowSlope = (slow - slowPrev) / slowPrev;
-    const regime = detectRegime(fast, slow, slowSlope, band.widthPct, currentRsi, params);
-    if (regime === "downtrend") {
-      if (position) {
-        return { action: "sell", confidence: 0.72, reasonCodes: ["sum-downtrend-exit"], targetWeight: 0 };
-      }
-      return hold5("sum-downtrend-blocked");
-    }
-    const sub = getSubStrategyForRegime(regime);
-    const decision = sub.strategy.decide(context, sub.scenario);
-    return {
-      ...decision,
-      reasonCodes: [...decision.reasonCodes, `sum-regime:${regime}`]
-    };
-  }
-};
-function detectRegime(fast, slow, slowSlope, bandWidthPct, currentRsi, params) {
-  const { uptrendSlopePct, downtrendSlopePct, sidewaysBandWidthMax, oversoldRsiMax } = params;
-  if (currentRsi <= oversoldRsiMax) return "oversold";
-  if (fast > slow && slowSlope >= uptrendSlopePct) return "uptrend";
-  if (fast < slow && slowSlope <= -downtrendSlopePct) return "downtrend";
-  if (bandWidthPct <= sidewaysBandWidthMax && Math.abs(slowSlope) < uptrendSlopePct) return "sideways";
-  return "mean-reversion";
-}
-function getSubStrategyForRegime(regime) {
-  switch (regime) {
-    case "uptrend":
-      return { strategy: momentumStrategy, scenario: momentumScenario };
-    case "sideways":
-      return { strategy: rangeGridStrategy, scenario: rangeGridScenario };
-    case "oversold":
-      return { strategy: averageDropCycleStrategy, scenario: averageDropCycleScenario };
-    case "mean-reversion":
-    default:
-      return { strategy: arbitrageStrategy, scenario: arbitrageScenario };
-  }
-}
-function hold5(reason) {
-  return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
-}
-var sumIndicatorCache = /* @__PURE__ */ new WeakMap();
-function getSumIndicators(candles, scenario) {
-  let scenarioCache = sumIndicatorCache.get(candles);
-  if (!scenarioCache) {
-    scenarioCache = /* @__PURE__ */ new Map();
-    sumIndicatorCache.set(candles, scenarioCache);
-  }
-  const key = `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
-  const cached = scenarioCache.get(key);
-  if (cached) return cached;
-  const closes = candles.map((c) => c.close);
-  const indicators = {
-    fast: ema(closes, scenario.params.fastEma),
-    slow: ema(closes, scenario.params.slowEma),
-    bands: bollinger(closes, scenario.params.bollPeriod, scenario.params.bollDeviations),
-    rsiValues: rsi(closes, scenario.params.rsiPeriod)
-  };
-  scenarioCache.set(key, indicators);
-  return indicators;
 }
 
 // src/strategies/rangeReentry.ts

@@ -39,7 +39,8 @@ type ScreenId =
   | "daily-general-c"
   | "daily-general-d"
   | "daily-general-e"
-  | "daily-general-sum";
+  | "daily-general-sum"
+  | "live-trade";
 type PopupTab = "graph" | "trades" | "returns" | "balance";
 type OperationPopupTab = Exclude<PopupTab, "graph">;
 type GuideFilterMode = GuideRuleMode | "all";
@@ -210,6 +211,10 @@ const menuSections: MenuSection[] = [
       { id: "daily-general-sum", label: "General-Sum" },
     ],
   },
+  {
+    title: "Live Trade",
+    items: [{ id: "live-trade", label: "General-C Live", caption: "C 전략 실매매 현황" }],
+  },
 ];
 
 const dailyScreens: Record<
@@ -283,6 +288,7 @@ export function App() {
   const [wsLiveResults, setWsLiveResults] = useState<WsLiveResults | null>(null);
   const [wsMode, setWsMode] = useState<"wsO" | "wsX">("wsO");
   const [wsRestarting, setWsRestarting] = useState(false);
+  const [liveTradeStatus, setLiveTradeStatus] = useState<LiveTradeStatus | null>(null);
   const lastRefreshCompletedAtRef = useRef("");
   const lastDashboardResultsGeneratedAtRef = useRef("");
   const lastDailyMarketGeneratedAtRef = useRef("");
@@ -405,6 +411,34 @@ export function App() {
     }
     pollWsLive();
     const timer = window.setInterval(pollWsLive, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let lastSeq = 0; // 단조 증가 시퀀스 — 역순/중복 응답 거부
+    async function pollLiveTrade() {
+      try {
+        const res = await fetch("/market/live-trade-status.json", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as LiveTradeStatus;
+        // 알 수 없는 스키마 버전 거부
+        if (data.schemaVersion !== undefined && data.schemaVersion < 1) return;
+        // 이전보다 오래된 시퀀스이면 last-good-status 유지
+        if (data.sequence !== undefined) {
+          if (data.sequence <= lastSeq) return;
+          lastSeq = data.sequence;
+        }
+        if (active) setLiveTradeStatus(data);
+      } catch {
+        // live-trader가 실행 중이 아닐 때는 파일 없음 — 무시
+      }
+    }
+    pollLiveTrade();
+    const timer = window.setInterval(pollLiveTrade, 5_000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -661,6 +695,7 @@ export function App() {
             plans={activeOptimizationPlans}
           />
         ) : null}
+        {screenId === "live-trade" ? <LiveTradeView status={liveTradeStatus} /> : null}
         {isDailyScreen ? (
           <DailyOperationView
             autoBlockMode={activeDailyAutoBlockMode}
@@ -750,6 +785,285 @@ async function loadRefreshStatus(): Promise<StrategyRefreshStatus | null> {
   } catch {
     return null;
   }
+}
+
+// ── Live Trade ────────────────────────────────────────────────────────────
+
+interface LiveTradePosition {
+  market: string;
+  quantity: string;
+  avgBuyPrice: number;
+  entryAt: string;
+  orderUuid: string;
+}
+
+interface LiveTradeLog {
+  at: string;
+  market: string;
+  side: "buy" | "sell";
+  amount: number;
+  price: number;
+  actualPrice?: number;
+  netKrw?: number;
+  dryRun: boolean;
+  reasonCodes: string[];
+}
+
+interface LiveTradeBalance {
+  krwCash: number;
+  invested: number;
+  currentValue: number;
+  totalValue: number;
+  unrealizedPnl: number;
+}
+
+interface LiveTradeStatus {
+  schemaVersion?: number;
+  writerPid?: number;
+  sequence?: number;
+  stateUpdatedAt?: string;
+  updatedAt: string;
+  mode: "live" | "dry-run";
+  totalBudget: number;
+  budgetPerCoin: number;
+  orderAmount: number;
+  positions: Record<string, LiveTradePosition>;
+  trades: LiveTradeLog[];
+  lastSellAt: Record<string, number>;
+  balance?: LiveTradeBalance;
+  startBalance?: number;
+}
+
+function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
+  if (!status) {
+    return (
+      <section className="panel hero-panel">
+        <p className="eyebrow">Live Trade</p>
+        <h3>live-trader가 실행 중이 아닙니다</h3>
+        <p style={{ color: "var(--text-secondary)", marginTop: 8 }}>
+          터미널에서 <code>npm run live:trader</code> 를 실행하면 여기에 실시간 현황이 표시됩니다.
+        </p>
+      </section>
+    );
+  }
+
+  const positions = Object.values(status.positions);
+  const oneDayAgo = Date.now() - 86_400_000;
+  const recentTrades = status.trades
+    .map((t, i) => ({ ...t, originalIndex: i }))
+    .filter((t) => new Date(t.at).getTime() >= oneDayAgo)
+    .reverse();
+  const buyCount = status.trades.filter((t) => t.side === "buy" && !t.dryRun).length;
+  const sellCount = status.trades.filter((t) => t.side === "sell" && !t.dryRun).length;
+
+  // 현재 KRW + 현재 코인가치에서 역산 → 각 거래 직후 총 평가액
+  // 체결 후 총 평가액 역산: KRW는 거래별 역산, 코인가치는 현재 시세 고정
+  // (과거 각 거래 시점의 코인 시세 불가 → 현재가 고정으로 근사, 마지막 행 = 현재 총 평가액 보장)
+  const currentCoinValue = status.balance?.currentValue ?? 0;
+  let tradeTotalBalances: number[] | null = null;
+  if (status.balance) {
+    let krw = status.balance.krwCash;
+    tradeTotalBalances = new Array(status.trades.length);
+    for (let i = status.trades.length - 1; i >= 0; i--) {
+      tradeTotalBalances[i] = krw + currentCoinValue;
+      const t = status.trades[i];
+      if (t.side === "buy") krw += t.netKrw ?? t.amount;
+      else krw -= t.netKrw ?? (t.amount * (t.actualPrice ?? t.price) * 0.9995);
+    }
+  }
+  // 시작 잔고: live-trader 기동 시점의 실제 시세로 기록된 값
+  const startBalance = status.startBalance ?? status.totalBudget;
+  const currentTotal = status.balance?.totalValue ?? null;
+
+  return (
+    <section className="panel" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* 헤더 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <p className="eyebrow">Live Trade</p>
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            padding: "2px 8px",
+            borderRadius: 4,
+            background: status.mode === "live" ? "var(--danger)" : "var(--text-secondary)",
+            color: "#fff",
+          }}
+        >
+          {status.mode === "live" ? "실매매" : "DRY RUN"}
+        </span>
+        {Date.now() - new Date(status.updatedAt).getTime() > 60_000 && (
+          <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4, background: "var(--warning, #f59e0b)", color: "#fff" }}>
+            오래된 데이터
+          </span>
+        )}
+        <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: "auto" }}>
+          업데이트: {new Date(status.updatedAt).toLocaleTimeString("ko-KR")}
+        </span>
+      </div>
+
+      {/* 요약 타일 */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        {[
+          { label: "시작 잔고", value: formatKrw(startBalance) },
+          { label: "현재 총 평가액", value: currentTotal !== null ? formatKrw(currentTotal) : "—" },
+          { label: "보유 포지션", value: `${positions.length}개` },
+          { label: "누적 거래", value: `매수 ${buyCount} / 매도 ${sellCount}` },
+        ].map(({ label, value }) => (
+          <div key={label} className="info-tile" style={{ padding: "12px 16px" }}>
+            <span className="info-tile-label">{label}</span>
+            <span className="info-tile-value">{value}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* 현재 포지션 */}
+      <div>
+        <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>현재 포지션</h4>
+        {positions.length === 0 ? (
+          <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>보유 포지션 없음</p>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["코인", "수량", "평균 매입가", "투입액", "진입 시간", "시나리오"].map((h) => (
+                  <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: "var(--text-secondary)", fontWeight: 500 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => {
+                const coin = p.market.replace("KRW-", "");
+                const qty = parseFloat(p.quantity);
+                const invested = qty * p.avgBuyPrice;
+                const entryTime = new Date(p.entryAt).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+                return (
+                  <tr key={p.market} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                    <td style={{ padding: "6px 8px", fontWeight: 600 }}>{coin}</td>
+                    <td style={{ padding: "6px 8px" }}>{qty.toLocaleString(undefined, { maximumSignificantDigits: 6 })}</td>
+                    <td style={{ padding: "6px 8px" }}>{p.avgBuyPrice.toLocaleString()}원</td>
+                    <td style={{ padding: "6px 8px" }}>{formatKrw(invested)}</td>
+                    <td style={{ padding: "6px 8px", color: "var(--text-secondary)" }}>{entryTime}</td>
+                    <td style={{ padding: "6px 8px", color: "var(--text-secondary)", fontSize: 11 }}>{p.orderUuid === "synced-from-upbit" ? "동기화" : p.orderUuid === "dry-run" ? "DRY" : "live"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* 잔고 현황 */}
+      {status.balance ? (
+        <div>
+          <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>잔고 현황</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+            {[
+              { label: "보유 현금", value: formatKrw(status.balance.krwCash) },
+              { label: "투입액 (매입가)", value: formatKrw(status.balance.invested) },
+              { label: "현재 가치", value: formatKrw(status.balance.currentValue) },
+              { label: "예상 손익", value: formatKrw(status.balance.unrealizedPnl), color: status.balance.unrealizedPnl >= 0 ? "var(--success)" : "var(--danger)" },
+              { label: "총 평가액", value: formatKrw(status.balance.totalValue) },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="info-tile" style={{ padding: "12px 16px" }}>
+                <span className="info-tile-label">{label}</span>
+                <span className="info-tile-value" style={color ? { color } : undefined}>{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* 최근 거래 이력 */}
+      <div>
+        <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>
+          최근 거래 이력 (최근 24시간 · {recentTrades.length}건)
+        </h4>
+        {recentTrades.length === 0 ? (
+          <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>거래 없음 — 신호 대기 중</p>
+        ) : (
+          <div style={{ overflowY: "auto", maxHeight: 363, border: "1px solid var(--border)", borderRadius: 4 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead style={{ position: "sticky", top: 0, background: "var(--panel-bg)", zIndex: 1 }}>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["시간", "코인", "매수/매도", "금액", "체결가", "체결 후 총 평가액"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: "var(--text-secondary)", fontWeight: 500 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {recentTrades.map((t, i) => {
+                  const coin = t.market.replace("KRW-", "");
+                  const isBuy = t.side === "buy";
+                  const time = new Date(t.at).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+                  const totalAfter = tradeTotalBalances?.[t.originalIndex];
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid var(--border-subtle)", background: isBuy ? "color-mix(in srgb, var(--gain) 7%, transparent)" : "color-mix(in srgb, var(--loss) 7%, transparent)" }}>
+                      <td style={{ padding: "6px 8px", color: "var(--text-secondary)" }}>{time}</td>
+                      <td style={{ padding: "6px 8px", fontWeight: 600 }}>{coin}</td>
+                      <td style={{ padding: "6px 8px", fontWeight: 700, color: isBuy ? "var(--gain)" : "var(--loss)" }}>
+                        {isBuy ? "매수" : "매도"}{t.dryRun ? " (dry)" : ""}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{isBuy ? formatKrw(t.amount) : formatKrw(t.amount * t.price)}</td>
+                      <td style={{ padding: "6px 8px" }}>
+                        {(t.actualPrice ?? t.price).toLocaleString()}원
+                        {t.actualPrice && t.actualPrice !== t.price
+                          ? <span style={{ fontSize: 10, color: "var(--text-secondary)", marginLeft: 4 }}>실</span>
+                          : null}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>
+                        {totalAfter !== undefined ? (
+                          <>
+                            {Math.floor(totalAfter).toLocaleString()}원
+                            {startBalance > 0 ? (
+                              <span style={{ fontSize: 11, marginLeft: 6, color: totalAfter >= startBalance ? "var(--gain)" : "var(--loss)" }}>
+                                {totalAfter >= startBalance ? "+" : ""}
+                                {(((totalAfter - startBalance) / startBalance) * 100).toFixed(2)}%
+                              </span>
+                            ) : null}
+                          </>
+                        ) : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* 시작 대비 손익 */}
+      {(() => {
+        const pnl = currentTotal !== null ? currentTotal - startBalance : null;
+        const pnlPct = pnl !== null && startBalance > 0 ? pnl / startBalance : null;
+        const pnlColor = pnl === null ? undefined : pnl >= 0 ? "var(--gain)" : "var(--loss)";
+        return (
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>시작 대비 손익</h4>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+              <div className="info-tile" style={{ padding: "12px 16px" }}>
+                <span className="info-tile-label">시작 잔고</span>
+                <span className="info-tile-value">{formatKrw(startBalance)}</span>
+              </div>
+              <div className="info-tile" style={{ padding: "12px 16px" }}>
+                <span className="info-tile-label">현재 총 평가액</span>
+                <span className="info-tile-value">{currentTotal !== null ? formatKrw(currentTotal) : "—"}</span>
+              </div>
+              <div className="info-tile" style={{ padding: "12px 16px" }}>
+                <span className="info-tile-label">손익</span>
+                <span className="info-tile-value" style={{ color: pnlColor }}>
+                  {pnl !== null && pnlPct !== null
+                    ? `${pnl >= 0 ? "+" : ""}${formatKrw(pnl)} (${pnl >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(2)}%)`
+                    : "—"}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </section>
+  );
 }
 
 function LoginPlaceholder() {

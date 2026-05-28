@@ -1,8 +1,7 @@
 import { bollinger, ema, rsi } from "../indicators/technical";
 import type { Candle, Strategy, StrategyContext, StrategyDecision, StrategyScenario } from "../types/trading";
 import { arbitrageScenario, arbitrageStrategy } from "./arbitrage";
-import { averageDropCycleScenario, averageDropCycleStrategy } from "./averageDropCycle";
-import { momentumScenario, momentumStrategy } from "./momentum";
+import { averageDropCycleScenario, averageDropCycleStrategy, averageRiseCycleScenario } from "./averageDropCycle";
 import { rangeGridScenario, rangeGridStrategy } from "./rangeGrid";
 
 type Regime = "uptrend" | "downtrend" | "sideways" | "oversold" | "mean-reversion";
@@ -120,7 +119,8 @@ function detectRegime(
 function getSubStrategyForRegime(regime: Regime): { strategy: Strategy; scenario: StrategyScenario } {
   switch (regime) {
     case "uptrend":
-      return { strategy: momentumStrategy, scenario: momentumScenario };
+      // E rise mode: buy VWAP breakout (faster response than A's EMA lag)
+      return { strategy: averageDropCycleStrategy, scenario: averageRiseCycleScenario };
     case "sideways":
       return { strategy: rangeGridStrategy, scenario: rangeGridScenario };
     case "oversold":
