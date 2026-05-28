@@ -1,15 +1,15 @@
 import type { Candle, Strategy, StrategyContext, StrategyDecision, StrategyScenario } from "../types/trading";
 
 export const averageDropCycleScenario: StrategyScenario = {
-  id: "average-drop-cycle-5m-3-5-3",
+  id: "average-drop-cycle-5m-entry-0.5-stop-2.0-take-0.5",
   traderId: "general-e",
-  name: "5m avg drop cycle",
+  name: "5m / entry-0.5% / stop-2.0% / take-0.5%",
   description: "Buy a drop from recent average price, then sell by average-based stop or take-profit.",
   params: {
     averageWindowCandles: 5,
-    entryDropPct: 0.03,
-    avgStopPct: 0.05,
-    avgTakeProfitPct: 0.03,
+    entryDropPct: 0.005,
+    avgStopPct: 0.020,
+    avgTakeProfitPct: 0.005,
   },
 };
 
@@ -66,25 +66,27 @@ export const averageDropCycleStrategy: Strategy = {
 function buildAverageDropCycleScenarios() {
   const scenarios: StrategyScenario[] = [];
   const averageWindows = [5, 10, 30, 60];
+  // Narrowed ranges: 0.5–2% in 0.5% steps
+  const halfPctSteps = [0.5, 1.0, 1.5, 2.0];
 
   for (const averageWindowCandles of averageWindows) {
-    for (let entryDropPct = 1; entryDropPct <= 5; entryDropPct += 1) {
-      for (let avgStopPct = 0; avgStopPct <= 5; avgStopPct += 1) {
-        for (let avgTakeProfitPct = 1; avgTakeProfitPct <= 5; avgTakeProfitPct += 1) {
+    for (const entryDrop of halfPctSteps) {
+      for (const avgStop of halfPctSteps) {
+        for (const avgTake of halfPctSteps) {
+          const e = entryDrop.toFixed(1);
+          const s = avgStop.toFixed(1);
+          const t = avgTake.toFixed(1);
           scenarios.push({
-            id: `average-drop-cycle-${averageWindowCandles}m-entry-${entryDropPct}-stop-${avgStopPct}-take-${avgTakeProfitPct}`,
+            id: `average-drop-cycle-${averageWindowCandles}m-entry-${e}-stop-${s}-take-${t}`,
             traderId: "general-e",
-            name: `${averageWindowCandles}m avg / ${formatDropThreshold(entryDropPct, 5)} entry / ${formatDropThreshold(
-              avgStopPct,
-              5,
-            )} stop / ${formatRiseThreshold(avgTakeProfitPct, 5)} take`,
+            name: `${averageWindowCandles}m / entry-${e}% / stop-${s}% / take-${t}%`,
             description:
-              "Parameter split for General-E average drop cycle using selected minute windows and one-percent threshold steps.",
+              "Parameter split for General-E using 0.5–2% narrowed ranges in 0.5% steps.",
             params: {
               averageWindowCandles,
-              entryDropPct: entryDropPct / 100,
-              avgStopPct: avgStopPct / 100,
-              avgTakeProfitPct: avgTakeProfitPct / 100,
+              entryDropPct: entryDrop / 100,
+              avgStopPct: avgStop / 100,
+              avgTakeProfitPct: avgTake / 100,
             },
           });
         }
@@ -95,13 +97,6 @@ function buildAverageDropCycleScenarios() {
   return scenarios;
 }
 
-function formatDropThreshold(value: number, maxValue: number) {
-  return value >= maxValue ? `<= -${value}%` : `-${value}%`;
-}
-
-function formatRiseThreshold(value: number, maxValue: number) {
-  return value >= maxValue ? `>= +${value}%` : `+${value}%`;
-}
 
 function getAverageTradePrice(candles: Candle[], candleIndex: number, windowCandles: number) {
   return getAverageTradePrices(candles, windowCandles)[candleIndex] ?? null;
