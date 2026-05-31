@@ -15,6 +15,7 @@ import WebSocket from "ws";
 import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { cancelOrder, getAccounts, getKrwBalance, getOrder, placeMarketBuy, placeMarketSell } from "./upbitOrder";
+import { fetchKrwMarkets, fetchTickers } from "../src/data/upbitClient";
 import { averageDropCycleStrategy } from "../src/strategies/averageDropCycle";
 import type { Candle, StrategyContext } from "../src/types/trading";
 
@@ -74,6 +75,9 @@ interface LiveState {
   startSnapshot?: PortfolioSnapshot;          // 기동 시 포트폴리오 스냅샷 (UI 잔고 현황용, 변경 안됨)
   pendingBuys?: Record<string, PendingBuy>;   // uuid → 미완료 매수 주문
   pendingSells?: Record<string, PendingSell>; // uuid → 미완료 매도 주문
+  startSnapshotScope?: "upbit-total-assets";
+  tradeHistorySnapshotScope?: "upbit-total-assets";
+  tradeHistoryResetAt?: string;
 }
 
 interface LiveTradeLog {
@@ -85,7 +89,8 @@ interface LiveTradeLog {
   actualPrice?: number;    // 실제 체결가 (Upbit 조회값)
   netKrw?: number;         // 실수령 KRW: 매수=지출액, 매도=executed_funds - paid_fee
   pnlKrw?: number;         // 실현 손익 (매도시): netKrw - 매수 원가
-  portfolioAfter?: PortfolioSnapshot; // 체결 직후 현금+관리 코인 평가 스냅샷
+  portfolioAfter?: PortfolioSnapshot; // 체결 직후 Upbit 전체 보유 자산 평가 스냅샷
+  portfolioSnapshotScope?: "upbit-total-assets";
   dryRun: boolean;
   reasonCodes: string[];
 }
@@ -135,9 +140,11 @@ const orderInProgress = new Set<string>(); // 매수/매도 진행 중인 마켓
 const emergencyStopPath = path.join(root, "data", "local", "live-trading-disabled.flag");
 const freezeAllPath = path.join(root, "data", "local", "live-trading-freeze-all.flag");
 
-// KRW 잔고 캐시 — getAccounts 호출을 60초에 1회로 제한, saveChain 블로킹 방지
+// 전체 Upbit 평가액 캐시 — heartbeat의 연속 API 호출을 줄이고 체결 직후에는 우회한다.
 let cachedKrwCash: number | null = null;
 let cachedKrwCashAt = 0;
+let cachedPortfolioSnapshot: PortfolioSnapshot | null = null;
+let krwMarketSetPromise: Promise<Set<string>> | null = null;
 
 // 공개 상태 파일 단조 증가 시퀀스 — UI의 역순/오래된 응답 거부에 사용
 let statusSequence = 0;
@@ -264,6 +271,7 @@ async function init() {
 
   // 업비트 잔고 동기화 + 미완료 주문 정산
   if (!DRY_RUN) {
+    await resetLegacyTradeHistory();
     await syncPositionsFromUpbit();
     await reconcilePendingBuys();
     await reconcilePendingSells();
@@ -344,6 +352,32 @@ async function saveState(s: LiveState): Promise<void> {
   }));
 }
 
+async function resetLegacyTradeHistory() {
+  if (state.tradeHistorySnapshotScope === "upbit-total-assets") return;
+
+  const resetAt = new Date().toISOString();
+  if (state.trades.length > 0) {
+    const archivePath = path.join(
+      root,
+      "data",
+      "local",
+      `live-trader-trade-history-legacy-${resetAt.replace(/[:.]/g, "-")}.json`,
+    );
+    await writeFile(archivePath, JSON.stringify({
+      archivedAt: resetAt,
+      reason: "portfolioAfter changed to Upbit total-assets valuation",
+      trades: state.trades,
+    }, null, 2), "utf8");
+    console.log(`[live-trader] 이전 거래 이력 ${state.trades.length}건 보관: ${archivePath}`);
+  }
+
+  state.trades = [];
+  state.tradeHistorySnapshotScope = "upbit-total-assets";
+  state.tradeHistoryResetAt = resetAt;
+  await saveState(state);
+  console.log(`[live-trader] 거래 이력 기준 재설정: ${resetAt}`);
+}
+
 async function computeBalance(s: LiveState) {
   const snapshot = await computePortfolioSnapshot(s);
   return {
@@ -355,8 +389,12 @@ async function computeBalance(s: LiveState) {
   };
 }
 
-async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnType<typeof getAccounts>>): Promise<PortfolioSnapshot> {
+async function computePortfolioSnapshot(
+  s: LiveState,
+  options: { accounts?: Awaited<ReturnType<typeof getAccounts>>; forceFresh?: boolean } = {},
+): Promise<PortfolioSnapshot> {
   const safe = (v: number) => (Number.isFinite(v) ? v : 0);
+  const { accounts, forceFresh = false } = options;
   const positions = Object.values(s.positions);
   const localInvested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
   const localCoinValue = safe(positions.reduce((sum, p) => {
@@ -375,19 +413,15 @@ async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnT
     };
   }
 
-  // accounts 명시 전달 없으면 30초 TTL 캐시 사용 — saveChain 내 연속 API 호출 방지
-  const useCache = !accounts && cachedKrwCash !== null && Date.now() - cachedKrwCashAt < 30_000;
+  // 일반 heartbeat는 30초 TTL 캐시를 사용하고 체결 직후에는 forceFresh로 우회한다.
+  const useCache = !forceFresh && !accounts && cachedPortfolioSnapshot !== null && Date.now() - cachedKrwCashAt < 30_000;
 
   try {
     const freshAccounts = accounts ?? (useCache ? null : await getAccounts(ACCESS_KEY, SECRET_KEY));
     if (!freshAccounts) {
-      // 캐시 유효 구간: krwCash 캐시 + 로컬 코인가치 사용
+      // 캐시 유효 구간: 직전에 조회한 Upbit 전체 평가액을 그대로 사용한다.
       return {
-        krwCash: cachedKrwCash!,
-        invested: localInvested,
-        coinValue: localCoinValue,
-        totalValue: cachedKrwCash! + localCoinValue,
-        pnl: localCoinValue - localInvested,
+        ...cachedPortfolioSnapshot!,
         at: new Date().toISOString(),
       };
     }
@@ -396,19 +430,32 @@ async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnT
     cachedKrwCash = krwCash;
     cachedKrwCashAt = Date.now();
 
+    const coinAccounts = freshAccounts.filter((account) => {
+      return account.currency !== "KRW" && safe(parseFloat(account.balance) + parseFloat(account.locked)) > 0;
+    });
+    const krwMarketSet = await getKrwMarketSet();
+    const markets = coinAccounts
+      .map((account) => `KRW-${account.currency}`)
+      .filter((market) => krwMarketSet.has(market));
+    const tickerByMarket = new Map(
+      (markets.length > 0 ? await fetchTickers(markets) : [])
+        .map((ticker) => [ticker.market, ticker.tradePrice]),
+    );
+
     let accountCoinValue = 0;
     let accountInvested = 0;
-    for (const market of selectedMarkets) {
-      const account = freshAccounts.find((a) => a.currency === market.replace("KRW-", ""));
-      if (!account) continue;
+    for (const account of coinAccounts) {
+      const market = `KRW-${account.currency}`;
+      if (!krwMarketSet.has(market)) continue;
       const qty = safe(parseFloat(account.balance) + parseFloat(account.locked));
       if (qty <= 0) continue;
       const avgBuyPrice = safe(parseFloat(account.avg_buy_price));
+      const currentPrice = safe(tickerByMarket.get(market) ?? getLatestPrice(market, avgBuyPrice));
       accountInvested += qty * avgBuyPrice;
-      accountCoinValue += qty * getLatestPrice(market, avgBuyPrice);
+      accountCoinValue += qty * currentPrice;
     }
 
-    return {
+    cachedPortfolioSnapshot = {
       krwCash,
       invested: accountInvested,
       coinValue: accountCoinValue,
@@ -416,7 +463,14 @@ async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnT
       pnl: accountCoinValue - accountInvested,
       at: new Date().toISOString(),
     };
+    return cachedPortfolioSnapshot;
   } catch {
+    if (cachedPortfolioSnapshot !== null) {
+      return {
+        ...cachedPortfolioSnapshot,
+        at: new Date().toISOString(),
+      };
+    }
     const krwCash = cachedKrwCash ?? Math.max(0, s.totalBudget - localInvested);
     return {
       krwCash,
@@ -429,6 +483,16 @@ async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnT
   }
 }
 
+async function getKrwMarketSet() {
+  krwMarketSetPromise ??= fetchKrwMarkets()
+    .then((markets) => new Set(markets.map((market) => market.market)))
+    .catch((error) => {
+      krwMarketSetPromise = null;
+      throw error;
+    });
+  return krwMarketSetPromise;
+}
+
 function getLatestPrice(market: string, fallback: number) {
   return liveCandle[market]?.close
     ?? closedCandles[market]?.[closedCandles[market].length - 1]?.close
@@ -436,10 +500,15 @@ function getLatestPrice(market: string, fallback: number) {
 }
 
 async function resetStartBalanceForRun() {
-  const snapshot = await computePortfolioSnapshot(state);
+  if (state.startSnapshotScope === "upbit-total-assets" && state.startBalance !== undefined && state.startSnapshot) {
+    console.log(`[live-trader] 시작 잔고 유지: ${Math.floor(state.startBalance).toLocaleString()}원`);
+    return;
+  }
+  const snapshot = await computePortfolioSnapshot(state, { forceFresh: true });
   state.startedAt = snapshot.at;
   state.startBalance = snapshot.totalValue;
   state.startSnapshot = snapshot;
+  state.startSnapshotScope = "upbit-total-assets";
   console.log(`[live-trader] 시작 잔고 재계산: ${Math.floor(state.startBalance).toLocaleString()}원 (현금 ${Math.floor(snapshot.krwCash).toLocaleString()}원 + 코인 ${Math.floor(snapshot.coinValue).toLocaleString()}원)`);
   await saveState(state);
 }
@@ -465,6 +534,9 @@ async function writePublicStatus(s: LiveState) {
     balance,
     startBalance: s.startBalance,
     startSnapshot: s.startSnapshot,
+    startSnapshotScope: s.startSnapshotScope,
+    tradeHistorySnapshotScope: s.tradeHistorySnapshotScope,
+    tradeHistoryResetAt: s.tradeHistoryResetAt,
   };
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
@@ -480,19 +552,26 @@ async function syncPositionsFromUpbit() {
   try {
     const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
     const syncedPositions: Record<string, LivePosition> = {};
-    for (const market of selectedMarkets) {
+    const marketsToSync = new Set([...selectedMarkets, ...Object.keys(state.positions)]);
+    for (const market of marketsToSync) {
       const currency = market.replace("KRW-", "");
       const account = accounts.find((a) => a.currency === currency);
       if (account && parseFloat(account.balance) > 0) {
-        // 이미 상태에 없으면 현재 보유량으로 초기화
-        if (!state.positions[market]) {
-          syncedPositions[market] = {
-            market,
-            quantity: account.balance,
-            avgBuyPrice: parseFloat(account.avg_buy_price),
-            entryAt: new Date().toISOString(),
-            orderUuid: "synced-from-upbit",
-          };
+        const existing = state.positions[market];
+        syncedPositions[market] = existing
+          ? {
+              ...existing,
+              quantity: account.balance,
+              avgBuyPrice: parseFloat(account.avg_buy_price),
+            }
+          : {
+              market,
+              quantity: account.balance,
+              avgBuyPrice: parseFloat(account.avg_buy_price),
+              entryAt: new Date().toISOString(),
+              orderUuid: "synced-from-upbit",
+            };
+        if (!existing) {
           console.log(`[live-trader] 포지션 동기화: ${market} ${account.balance}개 @ ${account.avg_buy_price}원`);
         }
       }
@@ -624,7 +703,8 @@ async function recordBuyFill(pb: PendingBuy, order: Awaited<ReturnType<typeof ge
     price: pb.price,
     actualPrice,
     netKrw: deltaFunds || pb.amount,
-    portfolioAfter: await computePortfolioSnapshot(state),
+    portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+    portfolioSnapshotScope: "upbit-total-assets",
     dryRun: false,
     reasonCodes: pb.reasonCodes,
   });
@@ -666,7 +746,8 @@ async function recordSellFill(ps: PendingSell, order: Awaited<ReturnType<typeof 
     actualPrice,
     netKrw,
     pnlKrw,
-    portfolioAfter: await computePortfolioSnapshot(state),
+    portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+    portfolioSnapshotScope: "upbit-total-assets",
     dryRun: false,
     reasonCodes: ps.reasonCodes,
   });
@@ -982,7 +1063,8 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
       price,
       actualPrice,
       netKrw,
-      portfolioAfter: await computePortfolioSnapshot(state),
+      portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+      portfolioSnapshotScope: "upbit-total-assets",
       dryRun: false,
       reasonCodes,
     });
@@ -1072,7 +1154,8 @@ async function executeSell(market: string, position: LivePosition, price: number
       actualPrice,
       netKrw,
       pnlKrw,
-      portfolioAfter: await computePortfolioSnapshot(state),
+      portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+      portfolioSnapshotScope: "upbit-total-assets",
       dryRun: false,
       reasonCodes,
     });

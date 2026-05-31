@@ -159,7 +159,7 @@ function clearPersistedPid() {
 
 function killWsLive() {
   // Only kill PIDs this project started — never touch other projects' processes
-  const pid = wsLiveState.pid ?? readPersistedPid();
+  const pid = readPersistedPid() ?? wsLiveState.pid;
   if (pid) {
     try {
       // /F force-kills, /T kills entire child tree (catches esbuild subprocess)
@@ -206,7 +206,8 @@ function wsLivePlugin() {
     configureServer(server) {
       server.middlewares.use("/api/ws-live/status", (_req, res) => {
         // Recover PID from file if Vite restarted and lost in-memory state
-        if (!wsLiveState.pid) wsLiveState.pid = readPersistedPid();
+        const persistedPid = readPersistedPid();
+        if (persistedPid && persistedPid !== wsLiveState.pid) wsLiveState.pid = persistedPid;
         // Sync running state with actual process existence
         if (wsLiveState.pid) {
           try {

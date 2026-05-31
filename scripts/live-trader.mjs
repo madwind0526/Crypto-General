@@ -111,6 +111,77 @@ async function cancelOrder(accessKey, secretKey, uuid) {
   return upbitRequest(accessKey, secretKey, "DELETE", "/v1/order", { uuid });
 }
 
+// src/data/upbitClient.ts
+var UPBIT_BASE_URL2 = "https://api.upbit.com";
+var DEFAULT_REQUEST_DELAY_MS = 120;
+var DEFAULT_MAX_RETRIES = 4;
+var lastRequestAt = 0;
+async function fetchKrwMarkets() {
+  const markets = await fetchUpbitJson("/v1/market/all?isDetails=false");
+  return markets.filter((market) => market.market.startsWith("KRW-")).map((market) => ({
+    market: market.market,
+    koreanName: market.korean_name,
+    englishName: market.english_name
+  }));
+}
+async function fetchTickers(markets) {
+  if (markets.length === 0) return [];
+  const params = new URLSearchParams({ markets: markets.join(",") });
+  const tickers = await fetchUpbitJson(`/v1/ticker?${params.toString()}`);
+  return tickers.map((ticker) => ({
+    market: ticker.market,
+    tradePrice: ticker.trade_price,
+    accTradePrice24h: ticker.acc_trade_price_24h,
+    accTradeVolume24h: ticker.acc_trade_volume_24h,
+    signedChangeRate: ticker.signed_change_rate
+  }));
+}
+async function fetchUpbitJson(pathname) {
+  let attempt = 0;
+  let lastError = null;
+  while (attempt <= DEFAULT_MAX_RETRIES) {
+    await waitForRateLimit();
+    let response;
+    try {
+      response = await fetch(`${UPBIT_BASE_URL2}${pathname}`, {
+        headers: { Accept: "application/json" }
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === DEFAULT_MAX_RETRIES) break;
+      await sleep2(getRetryDelayMs(null, attempt));
+      attempt += 1;
+      continue;
+    }
+    if (response.ok) return await response.json();
+    const text = await response.text();
+    lastError = new Error(`Upbit request failed ${response.status}: ${text}`);
+    if (!shouldRetry(response.status) || attempt === DEFAULT_MAX_RETRIES) break;
+    await sleep2(getRetryDelayMs(response, attempt));
+    attempt += 1;
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+async function waitForRateLimit() {
+  const elapsed = Date.now() - lastRequestAt;
+  if (elapsed < DEFAULT_REQUEST_DELAY_MS) await sleep2(DEFAULT_REQUEST_DELAY_MS - elapsed);
+  lastRequestAt = Date.now();
+}
+function shouldRetry(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+function getRetryDelayMs(response, attempt) {
+  const retryAfter = response?.headers.get("retry-after");
+  const retryAfterMs = retryAfter ? Number(retryAfter) * 1e3 : 0;
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return retryAfterMs;
+  return Math.min(8e3, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+}
+function sleep2(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 // src/strategies/averageDropCycle.ts
 var averageDropCycleScenario = {
   id: "average-drop-cycle-5m-entry-0.5-stop-2.0-take-0.5",
@@ -286,6 +357,8 @@ var emergencyStopPath = path.join(root, "data", "local", "live-trading-disabled.
 var freezeAllPath = path.join(root, "data", "local", "live-trading-freeze-all.flag");
 var cachedKrwCash = null;
 var cachedKrwCashAt = 0;
+var cachedPortfolioSnapshot = null;
+var krwMarketSetPromise = null;
 var statusSequence = 0;
 var writerRunId = `${process.pid}-${Date.now()}`;
 var lockHandle = null;
@@ -400,6 +473,7 @@ async function init() {
   await loadCandleHistory();
   state = await loadState();
   if (!DRY_RUN) {
+    await resetLegacyTradeHistory();
     await syncPositionsFromUpbit();
     await reconcilePendingBuys();
     await reconcilePendingSells();
@@ -472,6 +546,29 @@ async function saveState(s) {
     await writePublicStatus(s);
   }));
 }
+async function resetLegacyTradeHistory() {
+  if (state.tradeHistorySnapshotScope === "upbit-total-assets") return;
+  const resetAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (state.trades.length > 0) {
+    const archivePath = path.join(
+      root,
+      "data",
+      "local",
+      `live-trader-trade-history-legacy-${resetAt.replace(/[:.]/g, "-")}.json`
+    );
+    await writeFile(archivePath, JSON.stringify({
+      archivedAt: resetAt,
+      reason: "portfolioAfter changed to Upbit total-assets valuation",
+      trades: state.trades
+    }, null, 2), "utf8");
+    console.log(`[live-trader] \uC774\uC804 \uAC70\uB798 \uC774\uB825 ${state.trades.length}\uAC74 \uBCF4\uAD00: ${archivePath}`);
+  }
+  state.trades = [];
+  state.tradeHistorySnapshotScope = "upbit-total-assets";
+  state.tradeHistoryResetAt = resetAt;
+  await saveState(state);
+  console.log(`[live-trader] \uAC70\uB798 \uC774\uB825 \uAE30\uC900 \uC7AC\uC124\uC815: ${resetAt}`);
+}
 async function computeBalance(s) {
   const snapshot = await computePortfolioSnapshot(s);
   return {
@@ -482,8 +579,9 @@ async function computeBalance(s) {
     unrealizedPnl: snapshot.pnl
   };
 }
-async function computePortfolioSnapshot(s, accounts) {
+async function computePortfolioSnapshot(s, options = {}) {
   const safe = (v) => Number.isFinite(v) ? v : 0;
+  const { accounts, forceFresh = false } = options;
   const positions = Object.values(s.positions);
   const localInvested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
   const localCoinValue = safe(positions.reduce((sum, p) => {
@@ -500,16 +598,12 @@ async function computePortfolioSnapshot(s, accounts) {
       at: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
-  const useCache = !accounts && cachedKrwCash !== null && Date.now() - cachedKrwCashAt < 3e4;
+  const useCache = !forceFresh && !accounts && cachedPortfolioSnapshot !== null && Date.now() - cachedKrwCashAt < 3e4;
   try {
     const freshAccounts = accounts ?? (useCache ? null : await getAccounts(ACCESS_KEY, SECRET_KEY));
     if (!freshAccounts) {
       return {
-        krwCash: cachedKrwCash,
-        invested: localInvested,
-        coinValue: localCoinValue,
-        totalValue: cachedKrwCash + localCoinValue,
-        pnl: localCoinValue - localInvested,
+        ...cachedPortfolioSnapshot,
         at: (/* @__PURE__ */ new Date()).toISOString()
       };
     }
@@ -517,18 +611,27 @@ async function computePortfolioSnapshot(s, accounts) {
     const krwCash = safe(krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0);
     cachedKrwCash = krwCash;
     cachedKrwCashAt = Date.now();
+    const coinAccounts = freshAccounts.filter((account) => {
+      return account.currency !== "KRW" && safe(parseFloat(account.balance) + parseFloat(account.locked)) > 0;
+    });
+    const krwMarketSet = await getKrwMarketSet();
+    const markets = coinAccounts.map((account) => `KRW-${account.currency}`).filter((market) => krwMarketSet.has(market));
+    const tickerByMarket = new Map(
+      (markets.length > 0 ? await fetchTickers(markets) : []).map((ticker) => [ticker.market, ticker.tradePrice])
+    );
     let accountCoinValue = 0;
     let accountInvested = 0;
-    for (const market of selectedMarkets) {
-      const account = freshAccounts.find((a) => a.currency === market.replace("KRW-", ""));
-      if (!account) continue;
+    for (const account of coinAccounts) {
+      const market = `KRW-${account.currency}`;
+      if (!krwMarketSet.has(market)) continue;
       const qty = safe(parseFloat(account.balance) + parseFloat(account.locked));
       if (qty <= 0) continue;
       const avgBuyPrice = safe(parseFloat(account.avg_buy_price));
+      const currentPrice = safe(tickerByMarket.get(market) ?? getLatestPrice(market, avgBuyPrice));
       accountInvested += qty * avgBuyPrice;
-      accountCoinValue += qty * getLatestPrice(market, avgBuyPrice);
+      accountCoinValue += qty * currentPrice;
     }
-    return {
+    cachedPortfolioSnapshot = {
       krwCash,
       invested: accountInvested,
       coinValue: accountCoinValue,
@@ -536,7 +639,14 @@ async function computePortfolioSnapshot(s, accounts) {
       pnl: accountCoinValue - accountInvested,
       at: (/* @__PURE__ */ new Date()).toISOString()
     };
+    return cachedPortfolioSnapshot;
   } catch {
+    if (cachedPortfolioSnapshot !== null) {
+      return {
+        ...cachedPortfolioSnapshot,
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
     const krwCash = cachedKrwCash ?? Math.max(0, s.totalBudget - localInvested);
     return {
       krwCash,
@@ -548,14 +658,26 @@ async function computePortfolioSnapshot(s, accounts) {
     };
   }
 }
+async function getKrwMarketSet() {
+  krwMarketSetPromise ??= fetchKrwMarkets().then((markets) => new Set(markets.map((market) => market.market))).catch((error) => {
+    krwMarketSetPromise = null;
+    throw error;
+  });
+  return krwMarketSetPromise;
+}
 function getLatestPrice(market, fallback) {
   return liveCandle[market]?.close ?? closedCandles[market]?.[closedCandles[market].length - 1]?.close ?? fallback;
 }
 async function resetStartBalanceForRun() {
-  const snapshot = await computePortfolioSnapshot(state);
+  if (state.startSnapshotScope === "upbit-total-assets" && state.startBalance !== void 0 && state.startSnapshot) {
+    console.log(`[live-trader] \uC2DC\uC791 \uC794\uACE0 \uC720\uC9C0: ${Math.floor(state.startBalance).toLocaleString()}\uC6D0`);
+    return;
+  }
+  const snapshot = await computePortfolioSnapshot(state, { forceFresh: true });
   state.startedAt = snapshot.at;
   state.startBalance = snapshot.totalValue;
   state.startSnapshot = snapshot;
+  state.startSnapshotScope = "upbit-total-assets";
   console.log(`[live-trader] \uC2DC\uC791 \uC794\uACE0 \uC7AC\uACC4\uC0B0: ${Math.floor(state.startBalance).toLocaleString()}\uC6D0 (\uD604\uAE08 ${Math.floor(snapshot.krwCash).toLocaleString()}\uC6D0 + \uCF54\uC778 ${Math.floor(snapshot.coinValue).toLocaleString()}\uC6D0)`);
   await saveState(state);
 }
@@ -579,7 +701,10 @@ async function writePublicStatus(s) {
     lastSellAt: s.lastSellAt,
     balance,
     startBalance: s.startBalance,
-    startSnapshot: s.startSnapshot
+    startSnapshot: s.startSnapshot,
+    startSnapshotScope: s.startSnapshotScope,
+    tradeHistorySnapshotScope: s.tradeHistorySnapshotScope,
+    tradeHistoryResetAt: s.tradeHistoryResetAt
   };
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
@@ -594,18 +719,24 @@ async function syncPositionsFromUpbit() {
   try {
     const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
     const syncedPositions = {};
-    for (const market of selectedMarkets) {
+    const marketsToSync = /* @__PURE__ */ new Set([...selectedMarkets, ...Object.keys(state.positions)]);
+    for (const market of marketsToSync) {
       const currency = market.replace("KRW-", "");
       const account = accounts.find((a) => a.currency === currency);
       if (account && parseFloat(account.balance) > 0) {
-        if (!state.positions[market]) {
-          syncedPositions[market] = {
-            market,
-            quantity: account.balance,
-            avgBuyPrice: parseFloat(account.avg_buy_price),
-            entryAt: (/* @__PURE__ */ new Date()).toISOString(),
-            orderUuid: "synced-from-upbit"
-          };
+        const existing = state.positions[market];
+        syncedPositions[market] = existing ? {
+          ...existing,
+          quantity: account.balance,
+          avgBuyPrice: parseFloat(account.avg_buy_price)
+        } : {
+          market,
+          quantity: account.balance,
+          avgBuyPrice: parseFloat(account.avg_buy_price),
+          entryAt: (/* @__PURE__ */ new Date()).toISOString(),
+          orderUuid: "synced-from-upbit"
+        };
+        if (!existing) {
           console.log(`[live-trader] \uD3EC\uC9C0\uC158 \uB3D9\uAE30\uD654: ${market} ${account.balance}\uAC1C @ ${account.avg_buy_price}\uC6D0`);
         }
       }
@@ -722,7 +853,8 @@ async function recordBuyFill(pb, order) {
     price: pb.price,
     actualPrice,
     netKrw: deltaFunds || pb.amount,
-    portfolioAfter: await computePortfolioSnapshot(state),
+    portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+    portfolioSnapshotScope: "upbit-total-assets",
     dryRun: false,
     reasonCodes: pb.reasonCodes
   });
@@ -758,7 +890,8 @@ async function recordSellFill(ps, order) {
     actualPrice,
     netKrw,
     pnlKrw,
-    portfolioAfter: await computePortfolioSnapshot(state),
+    portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+    portfolioSnapshotScope: "upbit-total-assets",
     dryRun: false,
     reasonCodes: ps.reasonCodes
   });
@@ -981,10 +1114,10 @@ async function executeBuy(market, price, reasonCodes) {
     }
     const order = await placeMarketBuy(ACCESS_KEY, SECRET_KEY, market, ORDER_AMOUNT);
     console.log(`[live-trader] \u2705 ${log} \u2192 uuid=${order.uuid}`);
-    await sleep2(2e3);
+    await sleep3(2e3);
     let filled = await getOrder(ACCESS_KEY, SECRET_KEY, order.uuid);
     if (filled.state !== "done") {
-      await sleep2(2e3);
+      await sleep3(2e3);
       filled = await getOrder(ACCESS_KEY, SECRET_KEY, order.uuid);
     }
     if (filled.state !== "done") {
@@ -1018,7 +1151,8 @@ async function executeBuy(market, price, reasonCodes) {
       price,
       actualPrice,
       netKrw,
-      portfolioAfter: await computePortfolioSnapshot(state),
+      portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+      portfolioSnapshotScope: "upbit-total-assets",
       dryRun: false,
       reasonCodes
     });
@@ -1051,10 +1185,10 @@ async function executeSell(market, position, price, reasonCodes) {
     }
     const order = await placeMarketSell(ACCESS_KEY, SECRET_KEY, market, position.quantity);
     console.log(`[live-trader] \u2705 ${log} \u2192 uuid=${order.uuid}`);
-    await sleep2(2e3);
+    await sleep3(2e3);
     let filled = await getOrder(ACCESS_KEY, SECRET_KEY, order.uuid);
     if (filled.state !== "done") {
-      await sleep2(2e3);
+      await sleep3(2e3);
       filled = await getOrder(ACCESS_KEY, SECRET_KEY, order.uuid);
     }
     if (filled.state !== "done") {
@@ -1093,7 +1227,8 @@ async function executeSell(market, position, price, reasonCodes) {
       actualPrice,
       netKrw,
       pnlKrw,
-      portfolioAfter: await computePortfolioSnapshot(state),
+      portfolioAfter: await computePortfolioSnapshot(state, { forceFresh: true }),
+      portfolioSnapshotScope: "upbit-total-assets",
       dryRun: false,
       reasonCodes
     });
@@ -1143,7 +1278,7 @@ setInterval(() => {
   const trades = state.trades.length;
   console.log(`[live-trader] \uD3EC\uC9C0\uC158: ${pos} | \uB204\uC801 \uAC70\uB798: ${trades}\uD68C | ${DRY_RUN ? "DRY-RUN" : "\uC2E4\uB9E4\uB9E4"}`);
 }, 6e4);
-function sleep2(ms) {
+function sleep3(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 async function shutdown(code) {
