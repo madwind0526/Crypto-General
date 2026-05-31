@@ -47,8 +47,10 @@ const once = process.argv.includes("--once") || process.env.MARATHON_ONCE === "t
 const resetCache = process.env.MARATHON_RESET_CACHE === "true";
 const forcedStartAt = parseStartAt(process.env.MARATHON_START_AT_KST ?? process.env.MARATHON_START_AT);
 const dailyRollover = process.env.MARATHON_DAILY_ROLLOVER !== "false";
+const minPrice = Number(process.env.MARATHON_MIN_PRICE ?? 100);
+const maxPrice = Number(process.env.MARATHON_MAX_PRICE ?? 10_000);
 
-let selectedMarkets = await loadSelectedMarkets();
+let selectedMarkets = await filterKnownOutOfRangeMarkets(await loadSelectedMarkets());
 if (selectedMarkets.length === 0) {
   throw new Error("No selected markets found. Run persist:traders first or set UPBIT_MARKETS.");
 }
@@ -247,6 +249,23 @@ async function loadSelectedMarkets() {
   return [...markets].sort();
 }
 
+async function filterKnownOutOfRangeMarkets(markets) {
+  let candlesByMarket;
+  try {
+    candlesByMarket = JSON.parse(await readFile(cachePath, "utf8")).candlesByMarket;
+  } catch {
+    return markets;
+  }
+
+  return markets.filter((market) => {
+    const candles = candlesByMarket?.[market] ?? [];
+    const lastPrice = candles[candles.length - 1]?.close;
+    const keep = lastPrice === undefined || (lastPrice >= minPrice && lastPrice <= maxPrice);
+    if (!keep) console.warn(`[markets] excluding ${market}: ${lastPrice} KRW is outside ${minPrice}~${maxPrice}`);
+    return keep;
+  });
+}
+
 async function readCache() {
   try {
     return JSON.parse(await readFile(cachePath, "utf8"));
@@ -348,7 +367,7 @@ async function maybeRunDailyRollover() {
     ROLLOVER_AT: new Date(currentDayStart).toISOString(),
   });
 
-  selectedMarkets = await loadSelectedMarkets();
+  selectedMarkets = await filterKnownOutOfRangeMarkets(await loadSelectedMarkets());
   if (selectedMarkets.length === 0) {
     throw new Error("Daily rollover produced no selected markets.");
   }

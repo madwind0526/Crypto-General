@@ -26,6 +26,7 @@ interface UpbitMarket {
 interface UpbitTicker {
   market: string;
   acc_trade_price_24h: number;
+  trade_price: number;
 }
 
 interface UpbitMinuteCandle {
@@ -45,7 +46,9 @@ const outputRoot = path.join(root, process.env.ROLLOVER_OUTPUT_ROOT ?? "data/loc
 const marketCachePath = path.join(root, process.env.ROLLOVER_MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-daily.json");
 const publicMarketCachePath = path.join(root, "public/market/upbit-krw-1m-daily.json");
 const candidateMarketCount = Number(process.env.ROLLOVER_CANDIDATE_MARKET_COUNT ?? 30);
-const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 9);
+const monitoringMarketCount = Number(process.env.ROLLOVER_MONITORING_MARKET_COUNT ?? 15);
+const minPrice = Number(process.env.ROLLOVER_MIN_PRICE ?? 100);
+const maxPrice = Number(process.env.ROLLOVER_MAX_PRICE ?? 10_000);
 const runDashboardBuild = process.env.ROLLOVER_BUILD_DASHBOARD !== "false";
 const commandTimeoutMs = Number(process.env.ROLLOVER_COMMAND_TIMEOUT_MINUTES ?? 20) * 60 * 1000;
 const refreshTopMarkets = process.env.ROLLOVER_REFRESH_TOP30 !== "false";
@@ -124,6 +127,8 @@ async function persistStrategy(
       optimizationLookbackCandles: Number.POSITIVE_INFINITY,
       minCandles,
       guideRuleMode,
+      minPrice,
+      maxPrice,
     });
     const smoothedPlan = await smoothRefitPlan(strategy, plan, candlesByMarket, guideRuleMode, marketParamsDir);
     const compactPlan = compactOptimizationPlan(smoothedPlan);
@@ -451,6 +456,7 @@ async function fetchTopKrwMarkets(count: number) {
   const tickers = await fetchTickers(krwMarkets);
   return tickers
     .slice()
+    .filter((ticker) => ticker.trade_price >= minPrice && ticker.trade_price <= maxPrice)
     .sort((a, b) => b.acc_trade_price_24h - a.acc_trade_price_24h)
     .slice(0, count)
     .map((ticker) => ticker.market);
@@ -638,6 +644,8 @@ async function writeRolloverStatus(extra: Record<string, unknown> = {}) {
     },
     candidateMarketCount,
     monitoringMarketCount,
+    minPrice,
+    maxPrice,
     expectedWindowCandles,
     minCandles,
     minEligibleMarkets,

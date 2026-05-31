@@ -116,6 +116,8 @@ export interface BacktestConfig {
   initialCash: number;
   feeRate: number;
   slippageRate: number;
+  /** Per-trade slippage override. When provided, replaces slippageRate for each fill. */
+  dynamicSlippage?: (price: number) => number;
   guideRuleMode?: GuideRuleMode;
 }
 

@@ -18,14 +18,19 @@ function candle(close: number, index: number): Candle {
 
 describe("averageDropCycleStrategy", () => {
   it("builds the requested minute/percent parameter split", () => {
-    expect(averageDropCycleScenarios).toHaveLength(4 * 5 * 6 * 5);
+    expect(averageDropCycleScenarios).toHaveLength(4 * 15 * 5);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 5)).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 10)).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 60)).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 3)).toBe(false);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.averageWindowCandles === 2)).toBe(false);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.entryDropPct === 0.05)).toBe(true);
-    expect(averageDropCycleScenarios.some((scenario) => scenario.params.avgStopPct === 0)).toBe(true);
+    expect(averageDropCycleScenarios.some((scenario) => scenario.params.avgStopPct === 0)).toBe(false);
+    expect(
+      averageDropCycleScenarios.some(
+        (scenario) => scenario.params.entryDropPct === 0.05 && scenario.params.avgStopPct === 0.06,
+      ),
+    ).toBe(true);
     expect(averageDropCycleScenarios.some((scenario) => scenario.params.avgTakeProfitPct === 0.05)).toBe(true);
   });
 

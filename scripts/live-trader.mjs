@@ -1,57 +1,12 @@
 // scripts/live-trader.ts
 import "dotenv/config";
 import WebSocket from "ws";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // scripts/upbitOrder.ts
-import crypto2 from "node:crypto";
-
-// node_modules/uuid/dist-node/stringify.js
-var byteToHex = [];
-for (let i = 0; i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-// node_modules/uuid/dist-node/rng.js
-var rnds8 = new Uint8Array(16);
-function rng() {
-  return crypto.getRandomValues(rnds8);
-}
-
-// node_modules/uuid/dist-node/v4.js
-function v4(options, buf, offset) {
-  if (!buf && !options && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return _v4(options, buf, offset);
-}
-function _v4(options, buf, offset) {
-  options = options || {};
-  const rnds = options.random ?? options.rng?.() ?? rng();
-  if (rnds.length < 16) {
-    throw new Error("Random bytes length must be >= 16");
-  }
-  rnds[6] = rnds[6] & 15 | 64;
-  rnds[8] = rnds[8] & 63 | 128;
-  if (buf) {
-    offset = offset || 0;
-    if (offset < 0 || offset + 16 > buf.length) {
-      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-    }
-    for (let i = 0; i < 16; ++i) {
-      buf[offset + i] = rnds[i];
-    }
-    return buf;
-  }
-  return unsafeStringify(rnds);
-}
-var v4_default = v4;
-
-// scripts/upbitOrder.ts
+import crypto from "node:crypto";
+import { v4 as uuidv4 } from "uuid";
 var UPBIT_BASE_URL = "https://api.upbit.com";
 var REQUEST_TIMEOUT_MS = 1e4;
 var RETRY_BASE_MS = 500;
@@ -62,16 +17,16 @@ function sleep(ms) {
 function buildJwt(accessKey, secretKey, queryParams) {
   let payload = {
     access_key: accessKey,
-    nonce: v4_default()
+    nonce: uuidv4()
   };
   if (queryParams && Object.keys(queryParams).length > 0) {
     const qs = new URLSearchParams(queryParams).toString();
-    const hash = crypto2.createHash("sha512").update(qs).digest("hex");
+    const hash = crypto.createHash("sha512").update(qs).digest("hex");
     payload = { ...payload, query_hash: hash, query_hash_alg: "SHA512" };
   }
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto2.createHmac("sha256", secretKey).update(`${header}.${body}`).digest("base64url");
+  const sig = crypto.createHmac("sha256", secretKey).update(`${header}.${body}`).digest("base64url");
   return `${header}.${body}.${sig}`;
 }
 async function upbitRequest(accessKey, secretKey, method, path2, params, body) {
@@ -156,145 +111,145 @@ async function cancelOrder(accessKey, secretKey, uuid) {
   return upbitRequest(accessKey, secretKey, "DELETE", "/v1/order", { uuid });
 }
 
-// src/indicators/technical.ts
-function rateOfChange(values, period) {
-  return values.map((value, index) => {
-    if (index < period) return null;
-    const previous = values[index - period];
-    return previous === 0 ? 0 : (value - previous) / previous;
-  });
-}
-
-// src/strategies/arbitrage.ts
-var arbitrageScenario = {
-  id: "relative-strength-arb-default",
-  traderId: "arbitrage",
-  name: "Relative-value proxy",
-  description: "A spot-only proxy for future pair/funding arbitrage infrastructure.",
+// src/strategies/averageDropCycle.ts
+var averageDropCycleScenario = {
+  id: "average-drop-cycle-5m-entry-0.5-stop-2.0-take-0.5",
+  traderId: "general-e",
+  name: "5m / entry-0.5% / stop-2.0% / take-0.5%",
+  description: "Buy a drop from recent average price, then sell by average-based stop or take-profit.",
   params: {
-    lookback: 48,
-    zEntry: -1.6,
-    zExit: -0.2,
-    stopLossPct: 0.03,
-    maxHoldCandles: 48,
-    minProfitPct: 0.01,
-    // exit only when z recovers AND return >= this threshold
-    cooldownBars: 5
-    // bars to skip after closing before re-entering
+    averageWindowCandles: 5,
+    entryDropPct: 5e-3,
+    entryRisePct: 0,
+    avgStopPct: 0.02,
+    avgTakeProfitPct: 5e-3
   }
 };
-var arbitrageScenarios = [
-  {
-    ...arbitrageScenario,
-    id: "relative-value-balanced",
-    name: "Balanced relative value"
-  },
-  {
-    ...arbitrageScenario,
-    id: "relative-value-fast",
-    name: "Fast relative value",
-    params: {
-      ...arbitrageScenario.params,
-      lookback: 24,
-      zEntry: -1.25,
-      zExit: -0.05,
-      stopLossPct: 0.025,
-      maxHoldCandles: 24,
-      minProfitPct: 5e-3,
-      // fast scenario: 0.5% (quick mean-reversion, lower threshold)
-      cooldownBars: 3
-    }
-  },
-  {
-    ...arbitrageScenario,
-    id: "relative-value-deep",
-    name: "Deep relative value",
-    params: {
-      ...arbitrageScenario.params,
-      lookback: 72,
-      zEntry: -2.1,
-      zExit: -0.35,
-      stopLossPct: 0.045,
-      maxHoldCandles: 72,
-      minProfitPct: 8e-3,
-      cooldownBars: 10
-    }
-  }
-];
-var arbitrageStrategy = {
-  id: "arbitrage",
-  name: "Statistical / Funding Arbitrage",
-  description: "\uCD08\uAE30 \uBC84\uC804\uC740 \uD604\uBB3C \uB370\uC774\uD130\uB9CC \uC0AC\uC6A9\uD574 \uC0C1\uB300\uC801\uC73C\uB85C \uB20C\uB9B0 \uC885\uBAA9\uC758 \uD68C\uADC0 \uAC00\uB2A5\uC131\uC744 \uD14C\uC2A4\uD2B8\uD569\uB2C8\uB2E4.",
-  defaultScenario: arbitrageScenario,
-  scenarios: arbitrageScenarios,
-  decide(context, scenario = arbitrageScenario) {
-    const { candles, candleIndex, position, lastSellCandleIndex } = context;
-    const params = scenario.params;
+var averageDropCycleScenarios = buildAverageDropCycleScenarios();
+var averageDropCycleStrategy = {
+  id: "general-e",
+  name: "General-E Average Drop Cycle",
+  description: "\uCD5C\uADFC \uD3C9\uADE0 \uAC70\uB798\uAC00\uACA9 \uB300\uBE44 \uAE09\uB77D \uAD6C\uAC04\uC5D0\uC11C \uB9E4\uC218\uD558\uACE0, \uBCF4\uC720 \uC911\uC5D0\uB294 \uD3C9\uADE0\uAC00\uACA9 \uAE30\uBC18 \uC190\uC808/\uC775\uC808 \uC870\uAC74\uC73C\uB85C \uBC18\uBCF5 \uB9E4\uB9E4\uD558\uB294 \uC804\uB7B5\uC785\uB2C8\uB2E4.",
+  defaultScenario: averageDropCycleScenario,
+  scenarios: averageDropCycleScenarios,
+  decide(context, scenario = averageDropCycleScenario) {
+    const { candles, candleIndex, position } = context;
     const current = candles[candleIndex];
-    const indicators = getArbitrageIndicators(candles, scenario);
-    const window = indicators.returns.slice(Math.max(0, candleIndex - params.lookback), candleIndex);
-    if (window.length < params.lookback) return hold("warming-up");
-    const average = window.reduce((sum, value) => sum + value, 0) / window.length;
-    const variance = window.reduce((sum, value) => sum + (value - average) ** 2, 0) / (window.length - 1);
-    const sd = Math.sqrt(variance);
-    if (sd === 0) return hold("flat-relative-window");
-    const zScore = (indicators.returns[candleIndex] - average) / sd;
-    const minProfitPct = params.minProfitPct ?? 0;
-    const cooldownBars = params.cooldownBars ?? 0;
+    const averagePrice = getAverageTradePrice(candles, candleIndex, scenario.params.averageWindowCandles);
+    if (averagePrice === null || averagePrice <= 0) return hold("warming-up");
+    const entryRisePct = scenario.params.entryRisePct ?? 0;
+    const entryDropPct = scenario.params.entryDropPct;
+    const isRiseMode = entryRisePct > 0;
     if (position) {
-      const returnPct = (current.close - position.averagePrice) / position.averagePrice;
-      if (position.holdCandles >= params.maxHoldCandles) {
-        return { action: "sell", confidence: 0.58, reasonCodes: ["max-hold-exit"], targetWeight: 0 };
-      }
-      if (zScore >= params.zExit) {
-        if (returnPct >= minProfitPct) {
-          return { action: "sell", confidence: 0.58, reasonCodes: ["relative-value-normalized", "profit-target"], targetWeight: 0 };
+      if (isRiseMode) {
+        if (current.close <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["rise-stop-loss"], targetWeight: 0 };
         }
-        return hold("awaiting-profit-target");
+        if (current.close >= position.averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["rise-take-profit"], targetWeight: 0 };
+        }
+      } else {
+        if (averagePrice <= position.averagePrice * (1 - scenario.params.avgStopPct)) {
+          return { action: "sell", confidence: 0.76, reasonCodes: ["average-below-entry-stop"], targetWeight: 0 };
+        }
+        if (current.close >= averagePrice * (1 + scenario.params.avgTakeProfitPct)) {
+          return { action: "sell", confidence: 0.72, reasonCodes: ["price-above-average-take-profit"], targetWeight: 0 };
+        }
       }
-      return hold("relative-position-running");
+      return hold("average-cycle-position-running");
     }
-    if (cooldownBars > 0 && lastSellCandleIndex !== void 0) {
-      if (candleIndex - lastSellCandleIndex < cooldownBars) {
-        return hold("cooldown");
-      }
-    }
-    if (zScore <= params.zEntry) {
+    if (isRiseMode && current.close >= averagePrice * (1 + entryRisePct)) {
       return {
         action: "buy",
-        confidence: 0.54,
-        reasonCodes: ["temporary-underperformance", "statistical-reversion-candidate"],
-        targetWeight: 0.45,
-        stopLossPct: params.stopLossPct,
-        maxHoldCandles: params.maxHoldCandles
+        confidence: Math.min(0.9, 0.55 + entryRisePct * 5),
+        reasonCodes: ["price-above-average-entry"],
+        targetWeight: 0.65
       };
     }
-    return hold("no-relative-value-entry");
+    if (!isRiseMode && entryDropPct > 0 && current.close <= averagePrice * (1 - entryDropPct)) {
+      return {
+        action: "buy",
+        confidence: Math.min(0.9, 0.55 + entryDropPct * 5),
+        reasonCodes: ["price-below-average-entry"],
+        targetWeight: 0.65
+      };
+    }
+    return hold("waiting-average-signal");
   }
 };
+function buildAverageDropCycleScenarios() {
+  const scenarios = [];
+  const averageWindows = [5, 10, 30, 60];
+  const entryPcts = [0.01, 0.02, 0.03, 0.04, 0.05];
+  const stopPcts = [0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06];
+  const takePcts = [0.01, 0.02, 0.03, 0.04, 0.05];
+  for (const averageWindowCandles of averageWindows) {
+    for (const entryDropPct of entryPcts) {
+      for (const avgStopPct of stopPcts) {
+        if (Math.round(avgStopPct * 100) < Math.round(entryDropPct * 100) + 1) continue;
+        for (const avgTakeProfitPct of takePcts) {
+          const p = (entryDropPct * 100).toFixed(0);
+          const s = (avgStopPct * 100).toFixed(0);
+          const t = (avgTakeProfitPct * 100).toFixed(0);
+          scenarios.push({
+            id: `average-drop-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
+            traderId: "general-e",
+            name: `${averageWindowCandles}m / drop-${p}% / stop-${s}% / take-${t}%`,
+            description: "Drop mode: buy when price falls below VWAP.",
+            params: {
+              averageWindowCandles,
+              entryDropPct,
+              entryRisePct: 0,
+              avgStopPct,
+              avgTakeProfitPct
+            }
+          });
+        }
+      }
+    }
+  }
+  return scenarios;
+}
+function getAverageTradePrice(candles, candleIndex, windowCandles) {
+  return getAverageTradePrices(candles, windowCandles)[candleIndex] ?? null;
+}
+var averagePriceCache = /* @__PURE__ */ new WeakMap();
+function getAverageTradePrices(candles, windowCandles) {
+  let byWindow = averagePriceCache.get(candles);
+  if (!byWindow) {
+    byWindow = /* @__PURE__ */ new Map();
+    averagePriceCache.set(candles, byWindow);
+  }
+  const window = Math.max(1, windowCandles);
+  const key = `${window}:${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}`;
+  const cached = byWindow.get(key);
+  if (cached) return cached;
+  const averages = [];
+  let volumeSum = 0;
+  let quoteVolumeSum = 0;
+  let closeSum = 0;
+  for (let index = 0; index < candles.length; index += 1) {
+    if (index < window) {
+      averages.push(null);
+    } else {
+      averages.push(volumeSum > 0 && quoteVolumeSum > 0 ? quoteVolumeSum / volumeSum : closeSum / window);
+    }
+    const current = candles[index];
+    volumeSum += current.volume;
+    quoteVolumeSum += current.quoteVolume;
+    closeSum += current.close;
+    if (index >= window) {
+      const removed = candles[index - window];
+      volumeSum -= removed.volume;
+      quoteVolumeSum -= removed.quoteVolume;
+      closeSum -= removed.close;
+    }
+  }
+  byWindow.set(key, averages);
+  return averages;
+}
 function hold(reason) {
   return { action: "hold", confidence: 0, reasonCodes: [reason], targetWeight: 0 };
-}
-var arbitrageIndicatorCache = /* @__PURE__ */ new WeakMap();
-function getArbitrageIndicators(candles, scenario) {
-  let scenarioCache = arbitrageIndicatorCache.get(candles);
-  if (!scenarioCache) {
-    scenarioCache = /* @__PURE__ */ new Map();
-    arbitrageIndicatorCache.set(candles, scenarioCache);
-  }
-  const key = getMutableCandleCacheKey(candles, scenario);
-  const cached = scenarioCache.get(key);
-  if (cached) return cached;
-  const closes = candles.map((candle) => candle.close);
-  const returns = rateOfChange(closes, 1).map((value) => value ?? 0);
-  const indicators = {
-    returns
-  };
-  scenarioCache.set(key, indicators);
-  return indicators;
-}
-function getMutableCandleCacheKey(candles, scenario) {
-  return `${candles.length}:${candles[candles.length - 1]?.timestamp ?? 0}:${JSON.stringify(scenario.params)}`;
 }
 
 // scripts/live-trader.ts
@@ -303,17 +258,20 @@ var SECRET_KEY = process.env.UPBIT_SECRET_KEY ?? "";
 var LIVE_ENABLED = process.env.LIVE_TRADING_ENABLED === "true";
 var DRY_RUN = process.argv.includes("--dry-run") || !ACCESS_KEY || !SECRET_KEY || !LIVE_ENABLED;
 var TOTAL_BUDGET = Number(process.env.LIVE_BUDGET ?? 1e6);
-var MAX_COINS = 9;
+var MAX_COINS = 15;
 var BUDGET_PER_COIN = Math.floor(TOTAL_BUDGET / MAX_COINS);
-var TARGET_WEIGHT = 0.45;
+var TARGET_WEIGHT = 0.9;
 var ORDER_AMOUNT = Math.floor(BUDGET_PER_COIN * TARGET_WEIGHT);
 var MIN_ORDER_KRW = 5500;
 var MAX_DAILY_LOSS_KRW = Number(process.env.MAX_DAILY_LOSS_KRW ?? Math.floor(TOTAL_BUDGET * 0.1));
 var root = process.cwd();
 var statePath = path.join(root, "data", "local", "live-trader-state.json");
 var publicStatusPath = path.join(root, "public", "market", "live-trade-status.json");
-var planDir = path.join(root, "data", "local", "traders", "arbitrage");
+var lockPath = path.join(root, "data", "local", "live-trader.lock");
+var planDir = path.join(root, "data", "local", "traders", "general-e");
 var maxCandles = 1440;
+var minPrice = Number(process.env.LIVE_MIN_PRICE ?? 100);
+var maxPrice = Number(process.env.LIVE_MAX_PRICE ?? 1e4);
 var wsUrl = "wss://api.upbit.com/websocket/v1";
 var closedCandles = {};
 var liveCandle = {};
@@ -322,12 +280,16 @@ var state;
 var selectedMarkets = [];
 var marketScenario = /* @__PURE__ */ new Map();
 var saveChain = Promise.resolve();
+var reconcileChain = Promise.resolve();
 var orderInProgress = /* @__PURE__ */ new Set();
 var emergencyStopPath = path.join(root, "data", "local", "live-trading-disabled.flag");
 var freezeAllPath = path.join(root, "data", "local", "live-trading-freeze-all.flag");
 var cachedKrwCash = null;
 var cachedKrwCashAt = 0;
 var statusSequence = 0;
+var writerRunId = `${process.pid}-${Date.now()}`;
+var lockHandle = null;
+var statusPublishingEnabled = false;
 var activeWs = null;
 var reconnectTimer = null;
 async function isEntryBlocked() {
@@ -351,7 +313,69 @@ async function isAllTradesBlocked() {
     return false;
   }
 }
+async function acquireProcessLock() {
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      lockHandle = await open(lockPath, "wx");
+      await lockHandle.writeFile(JSON.stringify({
+        pid: process.pid,
+        writerRunId,
+        startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        mode: DRY_RUN ? "dry-run" : "live"
+      }, null, 2), "utf8");
+      console.log(`[live-trader] lock \uD68D\uB4DD: ${lockPath}`);
+      return;
+    } catch (e) {
+      const error = e;
+      if (error.code !== "EEXIST") throw e;
+      const lock = await readLockFile();
+      if (lock?.pid && isProcessAlive(lock.pid)) {
+        throw new Error(`live-trader\uAC00 \uC774\uBBF8 \uC2E4\uD589 \uC911\uC785\uB2C8\uB2E4. pid=${lock.pid}, startedAt=${lock.startedAt ?? "unknown"}`);
+      }
+      console.warn("[live-trader] stale lock \uAC10\uC9C0 \u2014 \uC81C\uAC70 \uD6C4 \uC7AC\uC2DC\uB3C4");
+      await unlink(lockPath).catch(() => {
+      });
+    }
+  }
+  throw new Error("live-trader lock \uD68D\uB4DD \uC2E4\uD328");
+}
+async function readLockFile() {
+  try {
+    return JSON.parse(await readFile(lockPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function isProcessAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const error = e;
+    return error.code === "EPERM";
+  }
+}
+async function releaseProcessLock() {
+  const handle = lockHandle;
+  lockHandle = null;
+  if (!handle) return;
+  try {
+    await handle.close();
+  } catch {
+  }
+  try {
+    const lock = await readLockFile();
+    if (!lock?.pid || lock.pid === process.pid) {
+      await unlink(lockPath);
+      console.log("[live-trader] lock \uD574\uC81C");
+    }
+  } catch {
+  }
+}
 async function init() {
+  await acquireProcessLock();
   if (DRY_RUN) {
     console.log("[live-trader] \u26A0\uFE0F  DRY RUN \uBAA8\uB4DC \u2014 \uC2E4\uC81C \uC8FC\uBB38 \uC5C6\uC74C");
     if (!ACCESS_KEY) console.log("[live-trader] \uC774\uC720: UPBIT_ACCESS_KEY \uBBF8\uC124\uC815");
@@ -363,9 +387,10 @@ async function init() {
   const planPath = path.join(planDir, "selected-symbols.ignored.json");
   console.log(`[live-trader] \uD50C\uB79C \uD30C\uC77C: ${planPath}`);
   const plan = JSON.parse(await readFile(planPath, "utf8"));
-  selectedMarkets = plan.selectedMarkets.map((m) => m.market);
+  selectedMarkets = await filterKnownOutOfRangeMarkets(plan.selectedMarkets.map((m) => m.market));
   for (const item of plan.selectedMarkets) {
-    const scenario = arbitrageStrategy.scenarios.find((s) => s.id === item.bestResult.scenarioId) ?? arbitrageStrategy.defaultScenario;
+    if (!selectedMarkets.includes(item.market)) continue;
+    const scenario = averageDropCycleStrategy.scenarios.find((s) => s.id === item.bestResult.scenarioId) ?? averageDropCycleStrategy.defaultScenario;
     marketScenario.set(item.market, scenario);
   }
   console.log(`[live-trader] \uB300\uC0C1 \uCF54\uC778 (${selectedMarkets.length}\uAC1C): ${selectedMarkets.map((m) => m.replace("KRW-", "")).join(", ")}`);
@@ -379,10 +404,27 @@ async function init() {
     await reconcilePendingBuys();
     await reconcilePendingSells();
   }
+  await resetStartBalanceForRun();
+  statusPublishingEnabled = true;
   console.log(`[live-trader] \uCF54\uC778\uB2F9 \uC608\uC0B0: ${BUDGET_PER_COIN.toLocaleString()}\uC6D0 | 1\uD68C \uB9E4\uC218: ${ORDER_AMOUNT.toLocaleString()}\uC6D0`);
   console.log(`[live-trader] \uD604\uC7AC \uD3EC\uC9C0\uC158: ${Object.keys(state.positions).length}\uAC1C`);
   await writePublicStatus(state);
   connect();
+}
+async function filterKnownOutOfRangeMarkets(markets) {
+  const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
+  try {
+    const cache = JSON.parse(await readFile(cachePath, "utf8"));
+    return markets.filter((market) => {
+      const candles = cache.candlesByMarket[market] ?? [];
+      const lastPrice = candles[candles.length - 1]?.close;
+      const keep = lastPrice === void 0 || lastPrice >= minPrice && lastPrice <= maxPrice;
+      if (!keep) console.warn(`[live-trader] \uC81C\uC678 ${market}: ${lastPrice}\uC6D0\uC740 ${minPrice}~${maxPrice}\uC6D0 \uBC94\uC704 \uBC16\uC785\uB2C8\uB2E4.`);
+      return keep;
+    });
+  } catch {
+    return markets;
+  }
 }
 async function loadCandleHistory() {
   const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
@@ -399,7 +441,12 @@ async function loadCandleHistory() {
 }
 async function loadState() {
   try {
-    return JSON.parse(await readFile(statePath, "utf8"));
+    const loaded = JSON.parse(await readFile(statePath, "utf8"));
+    return {
+      ...loaded,
+      totalBudget: TOTAL_BUDGET,
+      budgetPerCoin: BUDGET_PER_COIN
+    };
   } catch {
     const fresh = {
       startedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -419,45 +466,107 @@ async function saveState(s) {
   await (saveChain = saveChain.catch(() => {
   }).then(async () => {
     await mkdir(path.dirname(statePath), { recursive: true });
-    const tmp = statePath + ".tmp";
+    const tmp = `${statePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, snapshot, "utf8");
     await rename(tmp, statePath);
     await writePublicStatus(s);
   }));
 }
 async function computeBalance(s) {
-  const safe = (v) => isFinite(v) ? v : 0;
+  const snapshot = await computePortfolioSnapshot(s);
+  return {
+    krwCash: snapshot.krwCash,
+    invested: snapshot.invested,
+    currentValue: snapshot.coinValue,
+    totalValue: snapshot.totalValue,
+    unrealizedPnl: snapshot.pnl
+  };
+}
+async function computePortfolioSnapshot(s, accounts) {
+  const safe = (v) => Number.isFinite(v) ? v : 0;
   const positions = Object.values(s.positions);
-  const invested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
-  const currentValue = safe(positions.reduce((sum, p) => {
-    const candles = closedCandles[p.market];
-    const latestPrice = safe(candles?.[candles.length - 1]?.close ?? p.avgBuyPrice);
-    return sum + safe(parseFloat(p.quantity)) * latestPrice;
+  const localInvested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
+  const localCoinValue = safe(positions.reduce((sum, p) => {
+    return sum + safe(parseFloat(p.quantity)) * getLatestPrice(p.market, p.avgBuyPrice);
   }, 0));
   if (DRY_RUN) {
-    const krwCash2 = Math.max(0, s.totalBudget - invested);
-    return { krwCash: krwCash2, invested, currentValue, totalValue: krwCash2 + currentValue, unrealizedPnl: currentValue - invested };
+    const krwCash = Math.max(0, s.totalBudget - localInvested);
+    return {
+      krwCash,
+      invested: localInvested,
+      coinValue: localCoinValue,
+      totalValue: krwCash + localCoinValue,
+      pnl: localCoinValue - localInvested,
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    };
   }
-  const now = Date.now();
-  if (cachedKrwCash === null || now - cachedKrwCashAt > 6e4) {
-    try {
-      const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
-      const krwAccount = accounts.find((a) => a.currency === "KRW");
-      cachedKrwCash = safe(krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0);
-      cachedKrwCashAt = Date.now();
-    } catch {
-      if (cachedKrwCash === null) cachedKrwCash = Math.max(0, s.totalBudget - invested);
+  const useCache = !accounts && cachedKrwCash !== null && Date.now() - cachedKrwCashAt < 3e4;
+  try {
+    const freshAccounts = accounts ?? (useCache ? null : await getAccounts(ACCESS_KEY, SECRET_KEY));
+    if (!freshAccounts) {
+      return {
+        krwCash: cachedKrwCash,
+        invested: localInvested,
+        coinValue: localCoinValue,
+        totalValue: cachedKrwCash + localCoinValue,
+        pnl: localCoinValue - localInvested,
+        at: (/* @__PURE__ */ new Date()).toISOString()
+      };
     }
+    const krwAccount = freshAccounts.find((a) => a.currency === "KRW");
+    const krwCash = safe(krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0);
+    cachedKrwCash = krwCash;
+    cachedKrwCashAt = Date.now();
+    let accountCoinValue = 0;
+    let accountInvested = 0;
+    for (const market of selectedMarkets) {
+      const account = freshAccounts.find((a) => a.currency === market.replace("KRW-", ""));
+      if (!account) continue;
+      const qty = safe(parseFloat(account.balance) + parseFloat(account.locked));
+      if (qty <= 0) continue;
+      const avgBuyPrice = safe(parseFloat(account.avg_buy_price));
+      accountInvested += qty * avgBuyPrice;
+      accountCoinValue += qty * getLatestPrice(market, avgBuyPrice);
+    }
+    return {
+      krwCash,
+      invested: accountInvested,
+      coinValue: accountCoinValue,
+      totalValue: krwCash + accountCoinValue,
+      pnl: accountCoinValue - accountInvested,
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  } catch {
+    const krwCash = cachedKrwCash ?? Math.max(0, s.totalBudget - localInvested);
+    return {
+      krwCash,
+      invested: localInvested,
+      coinValue: localCoinValue,
+      totalValue: krwCash + localCoinValue,
+      pnl: localCoinValue - localInvested,
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    };
   }
-  const krwCash = cachedKrwCash;
-  return { krwCash, invested, currentValue, totalValue: krwCash + currentValue, unrealizedPnl: currentValue - invested };
+}
+function getLatestPrice(market, fallback) {
+  return liveCandle[market]?.close ?? closedCandles[market]?.[closedCandles[market].length - 1]?.close ?? fallback;
+}
+async function resetStartBalanceForRun() {
+  const snapshot = await computePortfolioSnapshot(state);
+  state.startedAt = snapshot.at;
+  state.startBalance = snapshot.totalValue;
+  state.startSnapshot = snapshot;
+  console.log(`[live-trader] \uC2DC\uC791 \uC794\uACE0 \uC7AC\uACC4\uC0B0: ${Math.floor(state.startBalance).toLocaleString()}\uC6D0 (\uD604\uAE08 ${Math.floor(snapshot.krwCash).toLocaleString()}\uC6D0 + \uCF54\uC778 ${Math.floor(snapshot.coinValue).toLocaleString()}\uC6D0)`);
+  await saveState(state);
 }
 async function writePublicStatus(s) {
+  if (!statusPublishingEnabled) return;
   const balance = await computeBalance(s);
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const payload = {
     schemaVersion: 1,
     writerPid: process.pid,
+    writerRunId,
     sequence: ++statusSequence,
     stateUpdatedAt: now,
     updatedAt: now,
@@ -469,11 +578,12 @@ async function writePublicStatus(s) {
     trades: s.trades,
     lastSellAt: s.lastSellAt,
     balance,
-    startBalance: s.startBalance
+    startBalance: s.startBalance,
+    startSnapshot: s.startSnapshot
   };
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
-    const tmp = publicStatusPath + ".tmp";
+    const tmp = `${publicStatusPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, JSON.stringify(payload), "utf8");
     await rename(tmp, publicStatusPath);
   } catch (e) {
@@ -483,12 +593,13 @@ async function writePublicStatus(s) {
 async function syncPositionsFromUpbit() {
   try {
     const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
+    const syncedPositions = {};
     for (const market of selectedMarkets) {
       const currency = market.replace("KRW-", "");
       const account = accounts.find((a) => a.currency === currency);
       if (account && parseFloat(account.balance) > 0) {
         if (!state.positions[market]) {
-          state.positions[market] = {
+          syncedPositions[market] = {
             market,
             quantity: account.balance,
             avgBuyPrice: parseFloat(account.avg_buy_price),
@@ -499,22 +610,11 @@ async function syncPositionsFromUpbit() {
         }
       }
     }
-    if (state.startBalance === void 0) {
-      const krwAccount = accounts.find((a) => a.currency === "KRW");
-      const krwCash = krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0;
-      const posVal = Object.values(state.positions).reduce((sum, p) => {
-        const candles = closedCandles[p.market];
-        const price = candles?.[candles.length - 1]?.close ?? p.avgBuyPrice;
-        return sum + parseFloat(p.quantity) * price;
-      }, 0);
-      state.startBalance = krwCash + posVal;
-      console.log(`[live-trader] \uC2DC\uC791 \uC794\uACE0 \uAE30\uB85D (\uCD5C\uCD08): ${Math.floor(state.startBalance).toLocaleString()}\uC6D0 (\uD604\uAE08 ${Math.floor(krwCash).toLocaleString()}\uC6D0 + \uCF54\uC778 ${Math.floor(posVal).toLocaleString()}\uC6D0)`);
-    } else {
-      console.log(`[live-trader] \uC2DC\uC791 \uC794\uACE0 \uC720\uC9C0: ${Math.floor(state.startBalance).toLocaleString()}\uC6D0`);
-    }
+    state.positions = syncedPositions;
     await saveState(state);
   } catch (e) {
     console.error("[live-trader] \uC794\uACE0 \uB3D9\uAE30\uD654 \uC2E4\uD328:", e);
+    throw e;
   }
 }
 async function reconcilePendingBuys() {
@@ -523,42 +623,34 @@ async function reconcilePendingBuys() {
   console.log(`[live-trader] \uBBF8\uC644\uB8CC \uB9E4\uC218 \uC8FC\uBB38 \uC815\uC0B0 (${Object.keys(pending).length}\uAC74)...`);
   for (const [uuid, pb] of Object.entries(pending)) {
     try {
-      const filled = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
-      if (filled.state === "done") {
-        const executedVolume = parseFloat(filled.executed_volume ?? "0");
-        if (executedVolume > 0 && !state.positions[pb.market]) {
-          const actualPrice = filled.avg_price ? parseFloat(filled.avg_price) : pb.price;
-          state.positions[pb.market] = { market: pb.market, quantity: String(executedVolume), avgBuyPrice: actualPrice, entryAt: pb.at, orderUuid: uuid };
-          state.trades.push({ at: pb.at, market: pb.market, side: "buy", amount: pb.amount, price: pb.price, actualPrice, netKrw: pb.amount, dryRun: false, reasonCodes: pb.reasonCodes });
-          console.log(`[live-trader] \u2705 \uD39C\uB529 \uB9E4\uC218 \uC644\uB8CC \uC815\uC0B0: ${pb.market} ${executedVolume}\uAC1C @ ${actualPrice.toLocaleString()}\uC6D0`);
-        }
-      } else if (filled.state === "wait" || filled.state === "watch") {
-        let cancelOk = false;
+      let order = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+      if (order.state === "wait" || order.state === "watch") {
         try {
           await cancelOrder(ACCESS_KEY, SECRET_KEY, uuid);
-          cancelOk = true;
           console.log(`[live-trader] \u{1F5D1}\uFE0F \uBBF8\uCCB4\uACB0 \uB9E4\uC218 \uCDE8\uC18C: ${uuid} (${pb.market})`);
         } catch (cancelErr) {
           console.error(`[live-trader] \uBBF8\uCCB4\uACB0 \uB9E4\uC218 \uCDE8\uC18C \uC2E4\uD328 (${uuid}):`, cancelErr);
+          continue;
         }
-        if (cancelOk) {
-          try {
-            const afterCancel = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
-            const partialVol = parseFloat(afterCancel.executed_volume ?? "0");
-            if (partialVol > 0 && !state.positions[pb.market]) {
-              const actualPrice = afterCancel.avg_price ? parseFloat(afterCancel.avg_price) : pb.price;
-              const netKrw = afterCancel.executed_funds ? parseFloat(afterCancel.executed_funds) : partialVol * actualPrice;
-              state.positions[pb.market] = { market: pb.market, quantity: String(partialVol), avgBuyPrice: actualPrice, entryAt: pb.at, orderUuid: uuid };
-              state.trades.push({ at: pb.at, market: pb.market, side: "buy", amount: pb.amount, price: pb.price, actualPrice, netKrw, dryRun: false, reasonCodes: pb.reasonCodes });
-              console.log(`[live-trader] \u26A0\uFE0F \uBD80\uBD84 \uCCB4\uACB0 \uD3EC\uC9C0\uC158 \uAE30\uB85D: ${pb.market} ${partialVol}\uAC1C @ ${actualPrice.toLocaleString()}\uC6D0`);
-            }
-          } catch (reQueryErr) {
-            console.error(`[live-trader] \uCDE8\uC18C \uD6C4 \uC7AC\uC870\uD68C \uC2E4\uD328 (${uuid}):`, reQueryErr);
-            continue;
-          }
+        try {
+          order = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+        } catch (reQueryErr) {
+          console.error(`[live-trader] \uCDE8\uC18C \uD6C4 \uC7AC\uC870\uD68C \uC2E4\uD328 (${uuid}):`, reQueryErr);
+          continue;
         }
+      }
+      const executedVolume = parseFloat(order.executed_volume ?? "0");
+      if (executedVolume > 0) {
+        await recordBuyFill(pb, order);
+      }
+      if (order.state === "wait" || order.state === "watch") {
+        console.log(`[live-trader] \uB9E4\uC218 \uC5EC\uC804\uD788 \uBBF8\uCCB4\uACB0: ${uuid} (${pb.market}, state=${order.state})`);
+        continue;
+      }
+      if (executedVolume <= 0) {
+        console.log(`[live-trader] \uB9E4\uC218 \uCCB4\uACB0 \uC5C6\uC74C: ${uuid} (${pb.market}, state=${order.state})`);
       } else {
-        console.log(`[live-trader] \uB9E4\uC218 \uC774\uBBF8 \uCDE8\uC18C\uB428: ${uuid} (${pb.market})`);
+        console.log(`[live-trader] \u2705 \uD39C\uB529 \uB9E4\uC218 \uC815\uC0B0 \uC644\uB8CC: ${pb.market} ${executedVolume}\uAC1C`);
       }
       delete pending[uuid];
     } catch (e) {
@@ -574,20 +666,17 @@ async function reconcilePendingSells() {
   for (const [uuid, ps] of Object.entries(pending)) {
     try {
       const filled = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+      const executedVolume = parseFloat(filled.executed_volume ?? "0");
+      if (executedVolume > 0) {
+        await recordSellFill(ps, filled);
+      }
       if (filled.state === "done") {
-        const actualPrice = filled.avg_price ? parseFloat(filled.avg_price) : void 0;
-        const netKrw = filled.executed_funds && filled.paid_fee ? parseFloat(filled.executed_funds) - parseFloat(filled.paid_fee) : void 0;
-        const pnlKrw = netKrw !== void 0 ? netKrw - ps.costBasis : void 0;
-        const candleTs = closedCandles[ps.market]?.[closedCandles[ps.market].length - 1]?.timestamp;
-        if (candleTs) state.lastSellAt[ps.market] = candleTs;
-        delete state.positions[ps.market];
-        state.trades.push({ at: ps.at, market: ps.market, side: "sell", amount: parseFloat(ps.quantity), price: ps.price, actualPrice, netKrw, pnlKrw, dryRun: false, reasonCodes: ps.reasonCodes });
-        console.log(`[live-trader] \u2705 \uD39C\uB529 \uB9E4\uB3C4 \uC644\uB8CC \uC815\uC0B0: ${ps.market} @ ${actualPrice?.toLocaleString() ?? "?"}\uC6D0`);
+        console.log(`[live-trader] \u2705 \uD39C\uB529 \uB9E4\uB3C4 \uC644\uB8CC \uC815\uC0B0: ${ps.market}`);
         delete pending[uuid];
       } else if (filled.state === "wait" || filled.state === "watch") {
         console.log(`[live-trader] \uB9E4\uB3C4 \uC5EC\uC804\uD788 \uBBF8\uCCB4\uACB0: ${uuid} (${ps.market}, state=${filled.state})`);
       } else {
-        console.warn(`[live-trader] \u26A0\uFE0F \uB9E4\uB3C4 \uCDE8\uC18C\uB428: ${uuid} (${ps.market}) \u2014 \uC218\uB3D9 \uD655\uC778 \uD544\uC694`);
+        console.warn(`[live-trader] \u26A0\uFE0F \uB9E4\uB3C4 \uCDE8\uC18C\uB428: ${uuid} (${ps.market}, \uCCB4\uACB0 ${executedVolume}\uAC1C)`);
         delete pending[uuid];
       }
     } catch (e) {
@@ -595,6 +684,99 @@ async function reconcilePendingSells() {
     }
   }
   await saveState(state);
+}
+async function recordBuyFill(pb, order) {
+  const executedVolume = parseFloat(order.executed_volume ?? "0");
+  const alreadyRecorded = parseFloat(pb.recordedVolume ?? "0");
+  const deltaVolume = executedVolume - alreadyRecorded;
+  if (deltaVolume <= 0) return;
+  const actualPrice = order.avg_price ? parseFloat(order.avg_price) : pb.price;
+  const executedFunds = order.executed_funds ? parseFloat(order.executed_funds) : executedVolume * actualPrice;
+  const previousFunds = alreadyRecorded * actualPrice;
+  const deltaFunds = Math.max(0, executedFunds - previousFunds);
+  const existingPosition = state.positions[pb.market];
+  if (existingPosition && existingPosition.orderUuid !== pb.uuid) {
+    console.warn(`[live-trader] \uD39C\uB529 \uB9E4\uC218 ${pb.market} \uCCB4\uACB0\uB7C9\uC740 \uAE30\uC874 \uD3EC\uC9C0\uC158\uC5D0 \uC774\uBBF8 \uBC18\uC601\uB41C \uAC83\uC73C\uB85C \uAC04\uC8FC\uD569\uB2C8\uB2E4.`);
+    pb.recordedVolume = String(executedVolume);
+    return;
+  }
+  if (existingPosition) {
+    const currentQty = parseFloat(existingPosition.quantity);
+    const nextQty = currentQty + deltaVolume;
+    existingPosition.avgBuyPrice = nextQty > 0 ? (currentQty * existingPosition.avgBuyPrice + deltaFunds) / nextQty : actualPrice;
+    existingPosition.quantity = String(nextQty);
+  } else {
+    state.positions[pb.market] = {
+      market: pb.market,
+      quantity: String(deltaVolume),
+      avgBuyPrice: actualPrice,
+      entryAt: pb.at,
+      orderUuid: pb.uuid
+    };
+  }
+  state.trades.push({
+    at: pb.at,
+    market: pb.market,
+    side: "buy",
+    amount: deltaFunds || pb.amount,
+    price: pb.price,
+    actualPrice,
+    netKrw: deltaFunds || pb.amount,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: false,
+    reasonCodes: pb.reasonCodes
+  });
+  pb.recordedVolume = String(executedVolume);
+}
+async function recordSellFill(ps, order) {
+  const executedVolume = parseFloat(order.executed_volume ?? "0");
+  const alreadyRecorded = parseFloat(ps.recordedVolume ?? "0");
+  const deltaVolume = executedVolume - alreadyRecorded;
+  if (deltaVolume <= 0) return;
+  const actualPrice = order.avg_price ? parseFloat(order.avg_price) : void 0;
+  const executedFunds = order.executed_funds ? parseFloat(order.executed_funds) : void 0;
+  const paidFee = order.paid_fee ? parseFloat(order.paid_fee) : 0;
+  const previousRatio = alreadyRecorded / Math.max(parseFloat(ps.quantity), 1e-12);
+  const currentRatio = executedVolume / Math.max(parseFloat(ps.quantity), 1e-12);
+  const netKrw = executedFunds !== void 0 ? Math.max(0, executedFunds * (currentRatio - previousRatio) / Math.max(currentRatio, 1e-12) - paidFee * (currentRatio - previousRatio) / Math.max(currentRatio, 1e-12)) : void 0;
+  const costBasis = ps.costBasis * (deltaVolume / Math.max(parseFloat(ps.quantity), 1e-12));
+  const pnlKrw = netKrw !== void 0 ? netKrw - costBasis : void 0;
+  const candleTs = closedCandles[ps.market]?.[closedCandles[ps.market].length - 1]?.timestamp;
+  if (candleTs) state.lastSellAt[ps.market] = candleTs;
+  const position = state.positions[ps.market];
+  if (position) {
+    const remaining = Math.max(0, parseFloat(position.quantity) - deltaVolume);
+    if (remaining <= 1e-10) delete state.positions[ps.market];
+    else position.quantity = String(remaining);
+  }
+  state.trades.push({
+    at: ps.at,
+    market: ps.market,
+    side: "sell",
+    amount: deltaVolume,
+    price: ps.price,
+    actualPrice,
+    netKrw,
+    pnlKrw,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: false,
+    reasonCodes: ps.reasonCodes
+  });
+  ps.recordedVolume = String(executedVolume);
+}
+function hasPendingOrders() {
+  return Boolean(
+    state.pendingBuys && Object.keys(state.pendingBuys).length > 0 || state.pendingSells && Object.keys(state.pendingSells).length > 0
+  );
+}
+function queuePendingReconcile(reason) {
+  if (DRY_RUN || !state || !hasPendingOrders()) return;
+  reconcileChain = reconcileChain.catch(() => {
+  }).then(async () => {
+    console.log(`[live-trader] pending \uC8FC\uBB38 \uC7AC\uC815\uC0B0 (${reason})`);
+    await reconcilePendingBuys();
+    await reconcilePendingSells();
+  });
 }
 function connect() {
   if (activeWs && (activeWs.readyState === WebSocket.OPEN || activeWs.readyState === WebSocket.CONNECTING)) {
@@ -739,7 +921,7 @@ async function processMinuteClose(market, _closedCandle) {
       }
     }
   }
-  const decision = arbitrageStrategy.decide(context, scenario);
+  const decision = averageDropCycleStrategy.decide(context, scenario);
   if (decision.action === "buy" && !position) {
     await executeBuy(market, candles[candleIndex].close, decision.reasonCodes);
   } else if (decision.action === "sell" && position) {
@@ -747,10 +929,14 @@ async function processMinuteClose(market, _closedCandle) {
   }
 }
 function getScenarioForMarket(market) {
-  return marketScenario.get(market) ?? arbitrageStrategy.defaultScenario;
+  return marketScenario.get(market) ?? averageDropCycleStrategy.defaultScenario;
 }
 async function executeBuy(market, price, reasonCodes) {
   if (orderInProgress.has(market)) return;
+  if (state.pendingBuys && Object.values(state.pendingBuys).some((pb) => pb.market === market)) {
+    console.warn(`[live-trader] \u26A0\uFE0F \uB9E4\uC218 \uC2A4\uD0B5 \u2014 \uBBF8\uC644\uB8CC \uB9E4\uC218 \uC8FC\uBB38\uC774 \uC788\uC74C: ${market}`);
+    return;
+  }
   orderInProgress.add(market);
   try {
     const coin = market.replace("KRW-", "");
@@ -769,16 +955,18 @@ async function executeBuy(market, price, reasonCodes) {
       return;
     }
     const openCount = Object.keys(state.positions).length;
-    if (openCount >= MAX_COINS) {
-      console.log(`[live-trader] \uC2A4\uD0B5 \u2014 \uCD5C\uB300 \uD3EC\uC9C0\uC158 \uC218 \uB3C4\uB2EC (${openCount}/${MAX_COINS})`);
+    const pendingBuyCount = state.pendingBuys ? Object.keys(state.pendingBuys).length : 0;
+    if (openCount + pendingBuyCount >= MAX_COINS) {
+      console.log(`[live-trader] \uC2A4\uD0B5 \u2014 \uCD5C\uB300 \uD3EC\uC9C0\uC158 \uC218 \uB3C4\uB2EC (${openCount}+pending ${pendingBuyCount}/${MAX_COINS})`);
       return;
     }
     const totalInvested = Object.values(state.positions).reduce(
       (sum, p) => sum + parseFloat(p.quantity) * p.avgBuyPrice,
       0
     );
-    if (totalInvested + ORDER_AMOUNT > TOTAL_BUDGET) {
-      console.log(`[live-trader] \uC2A4\uD0B5 \u2014 \uC608\uC0B0 \uCD08\uACFC (\uD22C\uC790 ${Math.floor(totalInvested).toLocaleString()}\uC6D0 + ${ORDER_AMOUNT.toLocaleString()}\uC6D0 > \uC608\uC0B0 ${TOTAL_BUDGET.toLocaleString()}\uC6D0)`);
+    const pendingBuyAmount = Object.values(state.pendingBuys ?? {}).reduce((sum, p) => sum + p.amount, 0);
+    if (totalInvested + pendingBuyAmount + ORDER_AMOUNT > TOTAL_BUDGET) {
+      console.log(`[live-trader] \uC2A4\uD0B5 \u2014 \uC608\uC0B0 \uCD08\uACFC (\uD22C\uC790 ${Math.floor(totalInvested).toLocaleString()}\uC6D0 + pending ${pendingBuyAmount.toLocaleString()}\uC6D0 + ${ORDER_AMOUNT.toLocaleString()}\uC6D0 > \uC608\uC0B0 ${TOTAL_BUDGET.toLocaleString()}\uC6D0)`);
       return;
     }
     const krwAvailable = await getKrwBalance(ACCESS_KEY, SECRET_KEY).catch(() => 0);
@@ -804,6 +992,7 @@ async function executeBuy(market, price, reasonCodes) {
       state.pendingBuys = state.pendingBuys ?? {};
       state.pendingBuys[order.uuid] = { uuid: order.uuid, market, amount: ORDER_AMOUNT, price, reasonCodes, at: (/* @__PURE__ */ new Date()).toISOString() };
       await saveState(state);
+      setTimeout(() => queuePendingReconcile("new-pending-buy"), 1e4);
       return;
     }
     const executedVolume = parseFloat(filled.executed_volume ?? "0");
@@ -821,7 +1010,18 @@ async function executeBuy(market, price, reasonCodes) {
       entryAt: (/* @__PURE__ */ new Date()).toISOString(),
       orderUuid: order.uuid
     };
-    state.trades.push({ at: (/* @__PURE__ */ new Date()).toISOString(), market, side: "buy", amount: ORDER_AMOUNT, price, actualPrice, netKrw, dryRun: false, reasonCodes });
+    state.trades.push({
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      market,
+      side: "buy",
+      amount: ORDER_AMOUNT,
+      price,
+      actualPrice,
+      netKrw,
+      portfolioAfter: await computePortfolioSnapshot(state),
+      dryRun: false,
+      reasonCodes
+    });
     await saveState(state);
   } catch (e) {
     console.error(`[live-trader] \u274C \uB9E4\uC218 \uC2E4\uD328 ${market}:`, e);
@@ -870,6 +1070,7 @@ async function executeSell(market, position, price, reasonCodes) {
         costBasis: parseFloat(position.quantity) * position.avgBuyPrice
       };
       await saveState(state);
+      setTimeout(() => queuePendingReconcile("new-pending-sell"), 1e4);
       return;
     }
     const actualPrice = filled.avg_price ? parseFloat(filled.avg_price) : void 0;
@@ -883,7 +1084,19 @@ async function executeSell(market, position, price, reasonCodes) {
     const candleTs = closedCandles[market]?.[closedCandles[market].length - 1]?.timestamp;
     if (candleTs) state.lastSellAt[market] = candleTs;
     delete state.positions[market];
-    state.trades.push({ at: (/* @__PURE__ */ new Date()).toISOString(), market, side: "sell", amount: parseFloat(position.quantity), price, actualPrice, netKrw, pnlKrw, dryRun: false, reasonCodes });
+    state.trades.push({
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      market,
+      side: "sell",
+      amount: parseFloat(position.quantity),
+      price,
+      actualPrice,
+      netKrw,
+      pnlKrw,
+      portfolioAfter: await computePortfolioSnapshot(state),
+      dryRun: false,
+      reasonCodes
+    });
     await saveState(state);
   } catch (e) {
     console.error(`[live-trader] \u274C \uB9E4\uB3C4 \uC2E4\uD328 ${market}:`, e);
@@ -905,13 +1118,27 @@ async function recordDryTrade(market, side, amount, price, reasonCodes) {
     if (candleTs) state.lastSellAt[market] = candleTs;
     delete state.positions[market];
   }
-  state.trades.push({ at: (/* @__PURE__ */ new Date()).toISOString(), market, side, amount, price, dryRun: true, reasonCodes });
+  state.trades.push({
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    market,
+    side,
+    amount,
+    price,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: true,
+    reasonCodes
+  });
   await saveState(state);
 }
 setInterval(() => {
+  queuePendingReconcile("interval");
+}, 15e3);
+setInterval(() => {
+  if (!state) return;
   writePublicStatus(state).catch((e) => console.error("[live-trader] \uD558\uD2B8\uBE44\uD2B8 \uC0C1\uD0DC \uC4F0\uAE30 \uC2E4\uD328:", e));
 }, 3e4);
 setInterval(() => {
+  if (!state) return;
   const pos = Object.values(state.positions).map((p) => p.market.replace("KRW-", "")).join(", ") || "\uC5C6\uC74C";
   const trades = state.trades.length;
   console.log(`[live-trader] \uD3EC\uC9C0\uC158: ${pos} | \uB204\uC801 \uAC70\uB798: ${trades}\uD68C | ${DRY_RUN ? "DRY-RUN" : "\uC2E4\uB9E4\uB9E4"}`);
@@ -919,7 +1146,25 @@ setInterval(() => {
 function sleep2(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
-init().catch((e) => {
+async function shutdown(code) {
+  if (activeWs) {
+    try {
+      activeWs.close();
+    } catch {
+    }
+  }
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  await releaseProcessLock();
+  process.exit(code);
+}
+process.once("SIGINT", () => {
+  void shutdown(130);
+});
+process.once("SIGTERM", () => {
+  void shutdown(143);
+});
+init().catch(async (e) => {
   console.error("[live-trader] \uCD08\uAE30\uD654 \uC2E4\uD328:", e);
+  await releaseProcessLock();
   process.exit(1);
 });

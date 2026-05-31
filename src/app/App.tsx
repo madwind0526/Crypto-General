@@ -178,8 +178,8 @@ const chartIntervalPresets: Array<{ interval: ChartInterval; label: string; valu
   { interval: { value: 30, unit: "minute" }, label: "30 minutes", value: "30m", windowLabel: "1 week" },
   { interval: { value: 1, unit: "hour" }, label: "1 hour", value: "1h", windowLabel: "1 month" },
 ];
-const dailyDisplayMarketCount = 9;
-const dailyMonitoringMarketCount = 9;
+const dailyDisplayMarketCount = 15;
+const dailyMonitoringMarketCount = 15;
 
 const menuSections: MenuSection[] = [
   {
@@ -224,22 +224,22 @@ const dailyScreens: Record<
   "daily-general-a": {
     title: "General-A Daily Operation",
     traderId: "momentum",
-    description: "추세/모멘텀 기반으로 9개 후보를 감시하고 가장 강한 매수 신호를 선택합니다.",
+    description: "추세/모멘텀 기반으로 15개 후보를 감시하고 가장 강한 매수 신호를 선택합니다.",
   },
   "daily-general-b": {
     title: "General-B Daily Operation",
     traderId: "range-grid",
-    description: "박스권/평균회귀 기반으로 9개 후보를 감시하고 과매도 반등 구간을 찾습니다.",
+    description: "박스권/평균회귀 기반으로 15개 후보를 감시하고 과매도 반등 구간을 찾습니다.",
   },
   "daily-general-c": {
     title: "General-C Daily Operation",
     traderId: "arbitrage",
-    description: "상대가치/통계 기반으로 9개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
+    description: "상대가치/통계 기반으로 15개 후보를 감시하고 위험 대비 기회가 큰 종목을 고릅니다.",
   },
   "daily-general-d": {
     title: "General-D Daily Operation",
     traderId: "general-d",
-    description: "General-B 기반 박스권 재진입 전략으로 9개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
+    description: "General-B 기반 박스권 재진입 전략으로 15개 후보를 감시하고, +2.5% 수익 목표와 직전 매도가 대비 눌림 재진입 조건을 적용합니다.",
   },
   "daily-general-e": {
     title: "General-E Daily Operation",
@@ -251,7 +251,7 @@ const dailyScreens: Record<
     title: "General-Sum Daily Operation",
     traderId: "general-sum",
     description:
-      "A~E 전략에 중복 등장한 코인 9개를 감시하고, 각 코인의 실시간 추세에 따라 적합한 전략으로 자동 전환합니다.",
+      "A~E 전략에 중복 등장한 코인 15개를 감시하고, 각 코인의 실시간 추세에 따라 적합한 전략으로 자동 전환합니다.",
   },
 };
 
@@ -420,18 +420,24 @@ export function App() {
   useEffect(() => {
     let active = true;
     let lastSeq = 0; // 단조 증가 시퀀스 — 역순/중복 응답 거부
+    let lastWriterRunId = "";
     async function pollLiveTrade() {
       try {
         const res = await fetch("/market/live-trade-status.json", { cache: "no-store" });
         if (!res.ok) return;
         const data = (await res.json()) as LiveTradeStatus;
-        // 알 수 없는 스키마 버전 거부
-        if (data.schemaVersion !== undefined && data.schemaVersion < 1) return;
-        // 이전보다 오래된 시퀀스이면 last-good-status 유지
-        if (data.sequence !== undefined) {
-          if (data.sequence <= lastSeq) return;
-          lastSeq = data.sequence;
+        // live status는 v1 writer metadata가 있는 payload만 신뢰한다.
+        if (data.schemaVersion !== 1 || typeof data.sequence !== "number" || !data.writerRunId) return;
+        if (!data.updatedAt || !data.positions || !Array.isArray(data.trades)) return;
+
+        // writer가 재시작되면 sequence가 1부터 다시 시작하므로 writerRunId 기준으로 리셋한다.
+        if (data.writerRunId !== lastWriterRunId) {
+          lastWriterRunId = data.writerRunId;
+          lastSeq = 0;
         }
+        // 같은 writer에서 이전보다 오래된 시퀀스이면 last-good-status 유지
+        if (data.sequence <= lastSeq) return;
+        lastSeq = data.sequence;
         if (active) setLiveTradeStatus(data);
       } catch {
         // live-trader가 실행 중이 아닐 때는 파일 없음 — 무시
@@ -805,8 +811,18 @@ interface LiveTradeLog {
   price: number;
   actualPrice?: number;
   netKrw?: number;
+  portfolioAfter?: LiveTradePortfolioSnapshot;
   dryRun: boolean;
   reasonCodes: string[];
+}
+
+interface LiveTradePortfolioSnapshot {
+  krwCash: number;
+  invested: number;
+  coinValue: number;
+  totalValue: number;
+  pnl: number;
+  at: string;
 }
 
 interface LiveTradeBalance {
@@ -820,6 +836,7 @@ interface LiveTradeBalance {
 interface LiveTradeStatus {
   schemaVersion?: number;
   writerPid?: number;
+  writerRunId?: string;
   sequence?: number;
   stateUpdatedAt?: string;
   updatedAt: string;
@@ -832,6 +849,7 @@ interface LiveTradeStatus {
   lastSellAt: Record<string, number>;
   balance?: LiveTradeBalance;
   startBalance?: number;
+  startSnapshot?: LiveTradePortfolioSnapshot;
 }
 
 function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
@@ -856,24 +874,12 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
   const buyCount = status.trades.filter((t) => t.side === "buy" && !t.dryRun).length;
   const sellCount = status.trades.filter((t) => t.side === "sell" && !t.dryRun).length;
 
-  // 현재 KRW + 현재 코인가치에서 역산 → 각 거래 직후 총 평가액
-  // 체결 후 총 평가액 역산: KRW는 거래별 역산, 코인가치는 현재 시세 고정
-  // (과거 각 거래 시점의 코인 시세 불가 → 현재가 고정으로 근사, 마지막 행 = 현재 총 평가액 보장)
-  const currentCoinValue = status.balance?.currentValue ?? 0;
-  let tradeTotalBalances: number[] | null = null;
-  if (status.balance) {
-    let krw = status.balance.krwCash;
-    tradeTotalBalances = new Array(status.trades.length);
-    for (let i = status.trades.length - 1; i >= 0; i--) {
-      tradeTotalBalances[i] = krw + currentCoinValue;
-      const t = status.trades[i];
-      if (t.side === "buy") krw += t.netKrw ?? t.amount;
-      else krw -= t.netKrw ?? (t.amount * (t.actualPrice ?? t.price) * 0.9995);
-    }
-  }
   // 시작 잔고: live-trader 기동 시점의 실제 시세로 기록된 값
   const startBalance = status.startBalance ?? status.totalBudget;
   const currentTotal = status.balance?.totalValue ?? null;
+  const pnl = currentTotal !== null ? currentTotal - startBalance : null;
+  const pnlPct = pnl !== null && startBalance > 0 ? pnl / startBalance : null;
+  const pnlColor = pnl === null ? undefined : pnl >= 0 ? "var(--gain)" : "var(--loss)";
 
   return (
     <section className="panel" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -898,21 +904,28 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
           </span>
         )}
         <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: "auto" }}>
-          업데이트: {new Date(status.updatedAt).toLocaleTimeString("ko-KR")}
+          업데이트: {new Date(status.updatedAt).toLocaleTimeString("ko-KR", { hour12: false })}
         </span>
       </div>
 
       {/* 요약 타일 */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
         {[
           { label: "시작 잔고", value: formatKrw(startBalance) },
           { label: "현재 총 평가액", value: currentTotal !== null ? formatKrw(currentTotal) : "—" },
+          {
+            label: "수익",
+            value: pnl !== null && pnlPct !== null
+              ? `${pnl >= 0 ? "+" : ""}${formatKrw(pnl)} (${pnl >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(2)}%)`
+              : "—",
+            color: pnlColor,
+          },
           { label: "보유 포지션", value: `${positions.length}개` },
           { label: "누적 거래", value: `매수 ${buyCount} / 매도 ${sellCount}` },
-        ].map(({ label, value }) => (
+        ].map(({ label, value, color }) => (
           <div key={label} className="info-tile" style={{ padding: "12px 16px" }}>
             <span className="info-tile-label">{label}</span>
-            <span className="info-tile-value">{value}</span>
+            <span className="info-tile-value" style={color ? { color } : undefined}>{value}</span>
           </div>
         ))}
       </div>
@@ -926,7 +939,7 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                {["코인", "수량", "평균 매입가", "투입액", "진입 시간", "시나리오"].map((h) => (
+                {["코인", "수량", "평균 매입가", "매입가", "진입 시간", "시나리오"].map((h) => (
                   <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: "var(--text-secondary)", fontWeight: 500 }}>{h}</th>
                 ))}
               </tr>
@@ -936,7 +949,7 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
                 const coin = p.market.replace("KRW-", "");
                 const qty = parseFloat(p.quantity);
                 const invested = qty * p.avgBuyPrice;
-                const entryTime = new Date(p.entryAt).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+                const entryTime = new Date(p.entryAt).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
                 return (
                   <tr key={p.market} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
                     <td style={{ padding: "6px 8px", fontWeight: 600 }}>{coin}</td>
@@ -953,17 +966,23 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
         )}
       </div>
 
-      {/* 잔고 현황 */}
-      {status.balance ? (
+      {/* 잔고 현황 — 기동 시점 스냅샷, trading 중 고정 */}
+      {status.startSnapshot ? (
         <div>
-          <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>잔고 현황</h4>
+          <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>
+            잔고 현황 <span style={{ fontSize: 11, fontWeight: 400, color: "var(--text-secondary)" }}>({new Date(status.startSnapshot.at).toLocaleTimeString("ko-KR", { hour12: false })} 기준)</span>
+          </h4>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
             {[
-              { label: "보유 현금", value: formatKrw(status.balance.krwCash) },
-              { label: "투입액 (매입가)", value: formatKrw(status.balance.invested) },
-              { label: "현재 가치", value: formatKrw(status.balance.currentValue) },
-              { label: "예상 손익", value: formatKrw(status.balance.unrealizedPnl), color: status.balance.unrealizedPnl >= 0 ? "var(--success)" : "var(--danger)" },
-              { label: "총 평가액", value: formatKrw(status.balance.totalValue) },
+              { label: "보유 현금", value: formatKrw(status.startSnapshot.krwCash) },
+              { label: "매입가", value: formatKrw(status.startSnapshot.invested) },
+              { label: "평가 가치", value: formatKrw(status.startSnapshot.coinValue) },
+              {
+                label: "손익",
+                value: formatKrw(status.startSnapshot.pnl),
+                color: status.startSnapshot.pnl >= 0 ? "var(--success)" : "var(--danger)",
+              },
+              { label: "시작 자산", value: formatKrw(status.startSnapshot.totalValue) },
             ].map(({ label, value, color }) => (
               <div key={label} className="info-tile" style={{ padding: "12px 16px" }}>
                 <span className="info-tile-label">{label}</span>
@@ -995,8 +1014,8 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
                 {recentTrades.map((t, i) => {
                   const coin = t.market.replace("KRW-", "");
                   const isBuy = t.side === "buy";
-                  const time = new Date(t.at).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-                  const totalAfter = tradeTotalBalances?.[t.originalIndex];
+                  const time = new Date(t.at).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+                  const totalAfter = t.portfolioAfter?.totalValue;
                   return (
                     <tr key={i} style={{ borderBottom: "1px solid var(--border-subtle)", background: isBuy ? "color-mix(in srgb, var(--gain) 7%, transparent)" : "color-mix(in srgb, var(--loss) 7%, transparent)" }}>
                       <td style={{ padding: "6px 8px", color: "var(--text-secondary)" }}>{time}</td>
@@ -1032,36 +1051,6 @@ function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
           </div>
         )}
       </div>
-
-      {/* 시작 대비 손익 */}
-      {(() => {
-        const pnl = currentTotal !== null ? currentTotal - startBalance : null;
-        const pnlPct = pnl !== null && startBalance > 0 ? pnl / startBalance : null;
-        const pnlColor = pnl === null ? undefined : pnl >= 0 ? "var(--gain)" : "var(--loss)";
-        return (
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-            <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--text-secondary)" }}>시작 대비 손익</h4>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-              <div className="info-tile" style={{ padding: "12px 16px" }}>
-                <span className="info-tile-label">시작 잔고</span>
-                <span className="info-tile-value">{formatKrw(startBalance)}</span>
-              </div>
-              <div className="info-tile" style={{ padding: "12px 16px" }}>
-                <span className="info-tile-label">현재 총 평가액</span>
-                <span className="info-tile-value">{currentTotal !== null ? formatKrw(currentTotal) : "—"}</span>
-              </div>
-              <div className="info-tile" style={{ padding: "12px 16px" }}>
-                <span className="info-tile-label">손익</span>
-                <span className="info-tile-value" style={{ color: pnlColor }}>
-                  {pnl !== null && pnlPct !== null
-                    ? `${pnl >= 0 ? "+" : ""}${formatKrw(pnl)} (${pnl >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(2)}%)`
-                    : "—"}
-                </span>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
     </section>
   );
 }
@@ -1099,7 +1088,7 @@ function GeneralScenarioBuilder({
         <div className="section-head">
           <div>
             <h3>General 시나리오 개요 및 구축</h3>
-            <p>A/B/C/D/E 일반 시나리오는 top 30 후보를 전략별로 최적화한 뒤 수익률 상위 9개 감시 종목을 고르는 흐름입니다.</p>
+            <p>A/B/C/D/E 일반 시나리오는 100~10,000원 코인 중 거래량 top 30 후보를 전략별로 최적화한 뒤 수익률 상위 15개 감시 종목을 고르는 흐름입니다.</p>
           </div>
           <strong>Top 30 Monitoring</strong>
         </div>
@@ -1159,7 +1148,7 @@ function AnomalyScenarioBuilder({
             <h3>General-D 시나리오 개요 및 구축</h3>
             <p>General-D는 특정 종목을 추격하기보다 박스권, 눌림, 재진입 조건이 맞을 때만 거래하는 실험 전략입니다.</p>
           </div>
-          <strong>{plan?.selectedMarkets.length ?? 0}/9</strong>
+          <strong>{plan?.selectedMarkets.length ?? 0}/15</strong>
         </div>
         <div className="logic-grid">
           <InfoTile title="진입 조건" value="박스권 과매도 또는 상승 추세 중 눌림 구간에서만 매수 후보로 봅니다." />
@@ -1327,7 +1316,7 @@ function GeneralReport({
             <div className="section-head">
               <div>
                 <h3>{profile?.name ?? traderId}</h3>
-                <p>{profile?.summary ?? "General strategy report."} All 9 selected monitoring candidates are shown below.</p>
+                <p>{profile?.summary ?? "General strategy report."} All 15 selected monitoring candidates are shown below.</p>
               </div>
               <strong>{formatMarketName(comparison?.bestResult.market ?? "TBD")}</strong>
             </div>
@@ -1492,7 +1481,7 @@ function DailyOperationView({
       <section className="panel watch-panel">
         <div className="section-head">
           <div className="inline-title">
-            <h3>9개 Daily Operation 화면</h3>
+            <h3>15개 Daily Operation 화면</h3>
             <IntervalControls interval={chartInterval} onChange={onChartIntervalChange} label="Chart period" compact />
           </div>
           <div className="operation-panel-actions">
@@ -1538,7 +1527,7 @@ function DailyOperationView({
               </article>
             );
           })}
-          {entries.length === 0 ? <div className="empty-state">선택된 9개 감시 종목이 아직 없습니다.</div> : null}
+          {entries.length === 0 ? <div className="empty-state">선택된 15개 감시 종목이 아직 없습니다.</div> : null}
         </div>
       </section>
 
@@ -1836,7 +1825,7 @@ function OptimizationSummary({ optimizationPlans }: { optimizationPlans: TraderO
       <div className="section-head">
         <div>
           <h3>Monitoring Selection Summary</h3>
-          <p>각 전략은 후보 30개를 평가한 뒤 수익률 상위 감시 대상 9개를 선택합니다.</p>
+          <p>각 전략은 100~10,000원 코인 중 거래량 상위 후보 30개를 평가한 뒤 수익률 상위 감시 대상 15개를 선택합니다.</p>
         </div>
         <strong>Monitor 30 -&gt; Display 9</strong>
       </div>

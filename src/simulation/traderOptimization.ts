@@ -6,6 +6,7 @@ export interface MarketTradeValueRank {
   market: string;
   tradeValue: number;
   candleCount: number;
+  lastPrice?: number;
 }
 
 export interface MarketScenarioOptimization {
@@ -24,6 +25,10 @@ export interface TraderOptimizationOptions {
   minCandles: number;
   guideRuleMode: GuideRuleMode;
   config?: BacktestConfig;
+  /** Minimum last-candle close price to include a market (inclusive). Default: 100 */
+  minPrice?: number;
+  /** Maximum last-candle close price to include a market (inclusive). Default: 10000 */
+  maxPrice?: number;
 }
 
 export interface TraderOptimizationPlan {
@@ -39,11 +44,13 @@ export interface TraderOptimizationPlan {
 
 const defaultOptions: TraderOptimizationOptions = {
   candidateMarketCount: 30,
-  monitoringMarketCount: 9,
+  monitoringMarketCount: 15,
   tradeValueLookbackCandles: 1440,
   optimizationLookbackCandles: Number.POSITIVE_INFINITY,
   minCandles: 120,
   guideRuleMode: "ignored",
+  minPrice: 100,
+  maxPrice: 10_000,
 };
 
 export function selectTopMarketsByTradeValue(
@@ -51,14 +58,22 @@ export function selectTopMarketsByTradeValue(
   count: number,
   lookbackCandles = defaultOptions.tradeValueLookbackCandles,
   minCandles = defaultOptions.minCandles,
+  minPrice = defaultOptions.minPrice,
+  maxPrice = defaultOptions.maxPrice,
 ): MarketTradeValueRank[] {
   return Object.entries(candlesByMarket)
     .map(([market, candles]) => ({
       market,
       tradeValue: sumRecentTradeValue(candles, lookbackCandles),
       candleCount: candles.length,
+      lastPrice: candles.length > 0 ? candles[candles.length - 1].close : 0,
     }))
-    .filter((rank) => rank.candleCount >= minCandles && rank.tradeValue > 0)
+    .filter((rank) => {
+      if (rank.candleCount < minCandles || rank.tradeValue <= 0) return false;
+      if (minPrice !== undefined && rank.lastPrice < minPrice) return false;
+      if (maxPrice !== undefined && rank.lastPrice > maxPrice) return false;
+      return true;
+    })
     .sort((a, b) => b.tradeValue - a.tradeValue)
     .slice(0, count);
 }
@@ -79,6 +94,8 @@ export function buildTraderOptimizationPlan(
     resolved.candidateMarketCount,
     resolved.tradeValueLookbackCandles,
     resolved.minCandles,
+    resolved.minPrice,
+    resolved.maxPrice,
   ).filter((rank) => !strategy.excludedMarkets?.has(rank.market));
 
   const optimizedMarkets = candidateMarkets
@@ -142,8 +159,11 @@ export function buildSumOptimizationPlan(
       market,
       tradeValue: overlapScore,
       candleCount: candlesByMarket[market]?.length ?? 0,
+      lastPrice: candlesByMarket[market]?.[candlesByMarket[market].length - 1]?.close ?? 0,
     }))
     .filter((c) => c.candleCount >= resolved.minCandles)
+    .filter((c) => resolved.minPrice === undefined || c.lastPrice >= resolved.minPrice)
+    .filter((c) => resolved.maxPrice === undefined || c.lastPrice <= resolved.maxPrice)
     .filter((c) => !strategy.excludedMarkets?.has(c.market));
 
   const optimizedMarkets = overlapCandidates

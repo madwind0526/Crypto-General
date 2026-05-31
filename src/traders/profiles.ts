@@ -13,7 +13,7 @@ export const traderProfiles: TraderProfile[] = [
     id: "momentum",
     name: "General-A Momentum",
     summary: "강한 추세와 거래량 확인을 우선으로 보고, 상승 흐름이 약해지면 빠르게 이탈하는 일반 시나리오입니다.",
-    strengths: ["추세장 대응", "명확한 진입/이탈 규칙", "9개 후보 중 강한 종목 선택에 적합"],
+    strengths: ["추세장 대응", "명확한 진입/이탈 규칙", "15개 후보 중 강한 종목 선택에 적합"],
     risks: ["박스권 반복 손실", "늦은 진입", "급락 갭과 슬리피지"],
   },
   {

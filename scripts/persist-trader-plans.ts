@@ -2,7 +2,24 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildSumOptimizationPlan, buildTraderOptimizationPlan, type TraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { generalSumStrategy, strategies } from "../src/strategies";
-import type { Candle, GuideRuleMode, Strategy } from "../src/types/trading";
+import { defaultBacktestConfig } from "../src/simulation/backtest";
+import type { BacktestConfig, Candle, GuideRuleMode, Strategy } from "../src/types/trading";
+
+function upbitTickSlippage(price: number): number {
+  if (price < 10)     return 0.01  / price;
+  if (price < 100)    return 0.1   / price;
+  if (price < 500)    return 1     / price;
+  if (price < 1000)   return 5     / price;
+  if (price < 5000)   return 10    / price;
+  if (price < 10_000) return 50    / price;
+  return 100 / price;
+}
+
+const realisticConfig: BacktestConfig = {
+  ...defaultBacktestConfig,
+  slippageRate: 0,
+  dynamicSlippage: upbitTickSlippage,
+};
 
 interface MarketCachePayload {
   source: string;
@@ -20,9 +37,11 @@ const guideRuleModes: GuideRuleMode[] = (process.env.GUIDE_RULE_MODES ?? "strict
 const marketCachePath = path.join(root, process.env.MARKET_CACHE_PATH ?? "data/market/upbit-krw-1m-backtracking.json");
 const outputRoot = path.join(root, "data", "local", "traders");
 const candidateMarketCount = Number(process.env.CANDIDATE_MARKET_COUNT ?? 30);
-const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 9);
+const monitoringMarketCount = Number(process.env.MONITORING_MARKET_COUNT ?? 15);
 const tradeValueLookbackCandles = Number(process.env.TRADE_VALUE_LOOKBACK_CANDLES ?? 1440);
 const optimizationLookbackCandles = Number(process.env.OPTIMIZATION_MAX_CANDLES ?? 10_080);
+const minPrice = process.env.MIN_PRICE ? Number(process.env.MIN_PRICE) : 100;
+const maxPrice = process.env.MAX_PRICE ? Number(process.env.MAX_PRICE) : 10_000;
 
 const payload = JSON.parse(await readFile(marketCachePath, "utf8")) as MarketCachePayload;
 const generatedAt = new Date().toISOString();
@@ -48,6 +67,9 @@ for (const guideRuleMode of guideRuleModes) {
     tradeValueLookbackCandles,
     optimizationLookbackCandles,
     guideRuleMode,
+    minPrice,
+    maxPrice,
+    config: realisticConfig,
   });
   await persistSumPlan(sumPlan, payload, guideRuleMode, generatedAt);
 }
@@ -74,6 +96,9 @@ async function persistStrategy(
       tradeValueLookbackCandles,
       optimizationLookbackCandles,
       guideRuleMode,
+      minPrice,
+      maxPrice,
+      config: realisticConfig,
     });
     result[guideRuleMode] = plan;
     await savePlanFiles(strategy.id, strategy.name, plan, payload, guideRuleMode, generatedAt);

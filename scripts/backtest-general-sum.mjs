@@ -1,5 +1,3 @@
-import { createRequire } from "module"; const require = createRequire(import.meta.url);
-
 // scripts/backtest-general-sum.ts
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -361,6 +359,7 @@ var defaultBacktestConfig = {
 };
 function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfig) {
   const guideRuleMode = config2.guideRuleMode ?? "ignored";
+  const slip = (price) => config2.dynamicSlippage ? config2.dynamicSlippage(price) : config2.slippageRate;
   let cash = config2.initialCash;
   let position = null;
   const trades = [];
@@ -392,7 +391,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
       const takeProfitTriggered = takeProfitPct > 0 && candle.high >= takeProfit;
       if (triggeredStops.length > 0 || takeProfitTriggered) {
         const exitPrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
-        const roundTripReturn = closePosition(exitPrice * (1 - config2.slippageRate), ["risk-rule-exit"], candle.timestamp);
+        const roundTripReturn = closePosition(exitPrice * (1 - slip(exitPrice)), ["risk-rule-exit"], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
         riskExited = true;
       }
@@ -444,7 +443,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
     }
     if (finalAction === "buy" && !position && decision.targetWeight > 0) {
       const budget = cash * Math.min(decision.targetWeight, 1);
-      const fillPrice = candle.close * (1 + config2.slippageRate);
+      const fillPrice = candle.close * (1 + slip(candle.close));
       const fee = budget * config2.feeRate;
       const quantity = Math.max(0, (budget - fee) / fillPrice);
       if (quantity > 0) {
@@ -475,7 +474,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
     if (finalAction === "sell" && position) {
       const keepFraction = decision.targetWeight > 0 && decision.targetWeight < 1 ? decision.targetWeight : void 0;
       const roundTripReturn = closePosition(
-        candle.close * (1 - config2.slippageRate),
+        candle.close * (1 - slip(candle.close)),
         [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         candle.timestamp,
         guideRuleEvaluation,
@@ -490,7 +489,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
   }
   if (position) {
     const last = candles[candles.length - 1];
-    const roundTripReturn = closePosition(last.close * (1 - config2.slippageRate), ["final-close"], last.timestamp);
+    const roundTripReturn = closePosition(last.close * (1 - slip(last.close)), ["final-close"], last.timestamp);
     roundTripReturns.push(roundTripReturn);
     if (equityCurve.length > 0 && equityCurve[equityCurve.length - 1].timestamp === last.timestamp) {
       equityCurve[equityCurve.length - 1].value = cash;
@@ -577,18 +576,26 @@ function scoreBacktestResult(result) {
 // src/simulation/traderOptimization.ts
 var defaultOptions = {
   candidateMarketCount: 30,
-  monitoringMarketCount: 9,
+  monitoringMarketCount: 15,
   tradeValueLookbackCandles: 1440,
   optimizationLookbackCandles: Number.POSITIVE_INFINITY,
   minCandles: 120,
-  guideRuleMode: "ignored"
+  guideRuleMode: "ignored",
+  minPrice: 100,
+  maxPrice: 1e4
 };
-function selectTopMarketsByTradeValue(candlesByMarket, count, lookbackCandles = defaultOptions.tradeValueLookbackCandles, minCandles = defaultOptions.minCandles) {
+function selectTopMarketsByTradeValue(candlesByMarket, count, lookbackCandles = defaultOptions.tradeValueLookbackCandles, minCandles = defaultOptions.minCandles, minPrice = defaultOptions.minPrice, maxPrice = defaultOptions.maxPrice) {
   return Object.entries(candlesByMarket).map(([market, candles]) => ({
     market,
     tradeValue: sumRecentTradeValue(candles, lookbackCandles),
-    candleCount: candles.length
-  })).filter((rank) => rank.candleCount >= minCandles && rank.tradeValue > 0).sort((a, b) => b.tradeValue - a.tradeValue).slice(0, count);
+    candleCount: candles.length,
+    lastPrice: candles.length > 0 ? candles[candles.length - 1].close : 0
+  })).filter((rank) => {
+    if (rank.candleCount < minCandles || rank.tradeValue <= 0) return false;
+    if (minPrice !== void 0 && rank.lastPrice < minPrice) return false;
+    if (maxPrice !== void 0 && rank.lastPrice > maxPrice) return false;
+    return true;
+  }).sort((a, b) => b.tradeValue - a.tradeValue).slice(0, count);
 }
 function buildTraderOptimizationPlan(strategy, candlesByMarket, options = {}) {
   const resolved = { ...defaultOptions, ...options };
@@ -601,7 +608,9 @@ function buildTraderOptimizationPlan(strategy, candlesByMarket, options = {}) {
     candlesByMarket,
     resolved.candidateMarketCount,
     resolved.tradeValueLookbackCandles,
-    resolved.minCandles
+    resolved.minCandles,
+    resolved.minPrice,
+    resolved.maxPrice
   ).filter((rank) => !strategy.excludedMarkets?.has(rank.market));
   const optimizedMarkets = candidateMarkets.map((candidate, index) => {
     const candles = trimCandles(candlesByMarket[candidate.market] ?? [], resolved.optimizationLookbackCandles);
@@ -643,8 +652,9 @@ function buildSumOptimizationPlan(strategy, sourcePlans, candlesByMarket, option
   const overlapCandidates = [...scoreMap2.entries()].sort((a, b) => b[1] - a[1]).slice(0, resolved.candidateMarketCount).map(([market, overlapScore]) => ({
     market,
     tradeValue: overlapScore,
-    candleCount: candlesByMarket[market]?.length ?? 0
-  })).filter((c) => c.candleCount >= resolved.minCandles).filter((c) => !strategy.excludedMarkets?.has(c.market));
+    candleCount: candlesByMarket[market]?.length ?? 0,
+    lastPrice: candlesByMarket[market]?.[candlesByMarket[market].length - 1]?.close ?? 0
+  })).filter((c) => c.candleCount >= resolved.minCandles).filter((c) => resolved.minPrice === void 0 || c.lastPrice >= resolved.minPrice).filter((c) => resolved.maxPrice === void 0 || c.lastPrice <= resolved.maxPrice).filter((c) => !strategy.excludedMarkets?.has(c.market));
   const optimizedMarkets = overlapCandidates.map((candidate, index) => {
     const candles = trimCandles(candlesByMarket[candidate.market] ?? [], resolved.optimizationLookbackCandles);
     const bestResult = optimizeStrategyForMarket(strategy, candles, config2);
@@ -767,8 +777,9 @@ var arbitrageStrategy = {
       if (position.holdCandles >= params.maxHoldCandles) {
         return { action: "sell", confidence: 0.58, reasonCodes: ["max-hold-exit"], targetWeight: 0 };
       }
+      const effectiveMinProfitPct = params.lowPriceThreshold && current.close < params.lowPriceThreshold ? params.lowPriceMinProfitPct ?? minProfitPct : minProfitPct;
       if (zScore >= params.zExit) {
-        if (returnPct >= minProfitPct) {
+        if (returnPct >= effectiveMinProfitPct) {
           return { action: "sell", confidence: 0.58, reasonCodes: ["relative-value-normalized", "profit-target"], targetWeight: 0 };
         }
         return hold("awaiting-profit-target");
@@ -833,14 +844,14 @@ var averageDropCycleScenario = {
   }
 };
 var averageRiseCycleScenario = {
-  id: "average-rise-cycle-5m-entry-0.5-stop-2.0-take-0.5",
+  id: "average-rise-cycle-5m-entry-0.2-stop-2.0-take-0.5",
   traderId: "general-e",
-  name: "5m / rise-entry-0.5% / stop-2.0% / take-0.5%",
+  name: "5m / rise-entry-0.2% / stop-2.0% / take-0.5%",
   description: "Buy a breakout above VWAP, exit when price drops from entry (stop) or rises further (take-profit).",
   params: {
     averageWindowCandles: 5,
     entryDropPct: 0,
-    entryRisePct: 5e-3,
+    entryRisePct: 2e-3,
     avgStopPct: 0.02,
     avgTakeProfitPct: 5e-3
   }
@@ -900,14 +911,17 @@ var averageDropCycleStrategy = {
 function buildAverageDropCycleScenarios() {
   const scenarios = [];
   const averageWindows = [5, 10, 30, 60];
-  const halfPctSteps = [0.5, 1, 1.5, 2];
+  const entryPcts = [0.01, 0.02, 0.03, 0.04, 0.05];
+  const stopPcts = [0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06];
+  const takePcts = [0.01, 0.02, 0.03, 0.04, 0.05];
   for (const averageWindowCandles of averageWindows) {
-    for (const pct of halfPctSteps) {
-      for (const avgStop of halfPctSteps) {
-        for (const avgTake of halfPctSteps) {
-          const p = pct.toFixed(1);
-          const s = avgStop.toFixed(1);
-          const t = avgTake.toFixed(1);
+    for (const entryDropPct of entryPcts) {
+      for (const avgStopPct of stopPcts) {
+        if (Math.round(avgStopPct * 100) < Math.round(entryDropPct * 100) + 1) continue;
+        for (const avgTakeProfitPct of takePcts) {
+          const p = (entryDropPct * 100).toFixed(0);
+          const s = (avgStopPct * 100).toFixed(0);
+          const t = (avgTakeProfitPct * 100).toFixed(0);
           scenarios.push({
             id: `average-drop-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
             traderId: "general-e",
@@ -915,23 +929,10 @@ function buildAverageDropCycleScenarios() {
             description: "Drop mode: buy when price falls below VWAP.",
             params: {
               averageWindowCandles,
-              entryDropPct: pct / 100,
+              entryDropPct,
               entryRisePct: 0,
-              avgStopPct: avgStop / 100,
-              avgTakeProfitPct: avgTake / 100
-            }
-          });
-          scenarios.push({
-            id: `average-rise-cycle-${averageWindowCandles}m-entry-${p}-stop-${s}-take-${t}`,
-            traderId: "general-e",
-            name: `${averageWindowCandles}m / rise-${p}% / stop-${s}% / take-${t}%`,
-            description: "Rise mode: buy when price breaks above VWAP (momentum/breakout entry).",
-            params: {
-              averageWindowCandles,
-              entryDropPct: 0,
-              entryRisePct: pct / 100,
-              avgStopPct: avgStop / 100,
-              avgTakeProfitPct: avgTake / 100
+              avgStopPct,
+              avgTakeProfitPct
             }
           });
         }
@@ -1751,7 +1752,7 @@ for (const [market, candles] of Object.entries(allCandles)) {
   candles7d[market] = candles.slice(-maxCandles);
 }
 var config = { ...defaultBacktestConfig, guideRuleMode: "ignored" };
-var opts = { candidateMarketCount: 30, monitoringMarketCount: 9, guideRuleMode: "ignored", config };
+var opts = { candidateMarketCount: 30, monitoringMarketCount: 15, guideRuleMode: "ignored", config };
 console.log("=".repeat(70));
 console.log("7-Day Backtest: General-Sum vs A-E  (1m candles, ignored guide)");
 console.log("=".repeat(70));

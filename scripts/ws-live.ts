@@ -2,9 +2,26 @@ import WebSocket from "ws";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PaperTradingSession, type PaperTradingResult } from "../src/simulation/paperTrading";
+import { defaultBacktestConfig } from "../src/simulation/backtest";
 import type { TraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { generalSumStrategy, strategies } from "../src/strategies";
-import type { Candle, GuideRuleMode, SafetyMode, Strategy, TraderId } from "../src/types/trading";
+import type { BacktestConfig, Candle, GuideRuleMode, SafetyMode, Strategy, TraderId } from "../src/types/trading";
+
+function upbitTickSlippage(price: number): number {
+  if (price < 10)     return 0.01  / price;
+  if (price < 100)    return 0.1   / price;
+  if (price < 500)    return 1     / price;
+  if (price < 1000)   return 5     / price;
+  if (price < 5000)   return 10    / price;
+  if (price < 10_000) return 50    / price;
+  return 100 / price;
+}
+
+const realisticConfig: BacktestConfig = {
+  ...defaultBacktestConfig,
+  slippageRate: 0,
+  dynamicSlippage: upbitTickSlippage,
+};
 
 type Mode = "wsO" | "wsX";
 
@@ -61,6 +78,8 @@ const outputIntervalMs = 5_000;
 const reconnectDelayMs = 5_000;
 const closeProcessDelayMs = 1_500;
 const maxCandles = Number(process.env.WS_MAX_CANDLES ?? process.env.PAPER_MAX_CANDLES ?? 1440);
+const minPrice = Number(process.env.WS_MIN_PRICE ?? 100);
+const maxPrice = Number(process.env.WS_MAX_PRICE ?? 10_000);
 const guideModes: GuideRuleMode[] = ["strict", "ignored"];
 const safetyModes: SafetyMode[] = ["enabled", "disabled"];
 const modes: Mode[] = ["wsO", "wsX"];
@@ -90,9 +109,10 @@ async function init() {
   operationStartAt = parseBoundary(cache.retentionPolicy?.operationStartAt ?? cache.retentionPolicy?.resetFrom);
 
   await loadPlans();
-  selectedMarkets = getPlanMarkets();
+  selectedMarkets = filterKnownOutOfRangeMarkets(getPlanMarkets(), cache.candlesByMarket);
   if (selectedMarkets.length === 0) {
-    selectedMarkets = cache.selectedMarkets?.length ? cache.selectedMarkets : Object.keys(cache.candlesByMarket);
+    const fallbackMarkets = cache.selectedMarkets?.length ? cache.selectedMarkets : Object.keys(cache.candlesByMarket);
+    selectedMarkets = filterKnownOutOfRangeMarkets(fallbackMarkets, cache.candlesByMarket);
   }
   seedClosedCandles(cache);
   seedSessions();
@@ -116,6 +136,16 @@ function getPlanMarkets() {
     }
   }
   return [...markets].sort();
+}
+
+function filterKnownOutOfRangeMarkets(markets: string[], candlesByMarket: Record<string, Candle[]>) {
+  return markets.filter((market) => {
+    const candles = candlesByMarket[market] ?? [];
+    const lastPrice = candles[candles.length - 1]?.close;
+    const keep = lastPrice === undefined || (lastPrice >= minPrice && lastPrice <= maxPrice);
+    if (!keep) console.warn(`[ws-live] excluding ${market}: ${lastPrice} KRW is outside ${minPrice}~${maxPrice}`);
+    return keep;
+  });
 }
 
 async function loadMarketCache() {
@@ -186,6 +216,7 @@ function seedSessions() {
             guideRuleMode,
             autoBlockMode,
             maxCandles,
+            config: realisticConfig,
           });
           replaySession(session, strategy, plan, guideRuleMode, autoBlockMode);
           sessions[mode][guideRuleMode][autoBlockMode][strategy.id] = session;

@@ -11,6 +11,8 @@ These rules are not financial advice. They are project rules for simulation, bac
 
 Comparing strict versus ignored mode is required before selecting a trader for real-money automation.
 
+The default operating view is `Guideline X / Safety X`. Guideline and Safety options may change whether a signal is accepted, but every option must use the same price-filtered top-30 candidate policy and top-15 monitoring count.
+
 ## Trader Operation Model
 
 ### General Traders A/B/C/D/E
@@ -21,7 +23,8 @@ General-A through General-E are normal strategy traders such as momentum, mean r
 
 1. Select potential coins.
    - Scan all Upbit KRW markets.
-   - Select the top 30 markets by total trading value.
+   - Keep only markets priced from 100 KRW through 10,000 KRW.
+   - Select the top 30 remaining markets by total trading value.
 
 2. Optimize scenario parameters.
    - For each of the 30 markets, run backtesting while changing the trader's scenario parameters.
@@ -30,17 +33,17 @@ General-A through General-E are normal strategy traders such as momentum, mean r
 
 3. Select monitoring coins.
    - Rank the 30 markets by pure profit rate, using risk-adjusted quality only as a tie-breaker.
-   - Select 9 markets for monitoring and display them as a 3x3 board.
-   - Result: 9 markets, each with market-specific scenario parameters.
+   - Select 15 markets for monitoring.
+   - Result: 15 markets, each with market-specific scenario parameters.
 
 #### Daily Operation
 
-1. Every morning, load the 9 selected markets and their market-specific parameter sets.
-2. Check buy signals across the 9 markets.
+1. Every morning, load the 15 selected markets and their market-specific parameter sets.
+2. Check buy signals across the 15 markets.
 3. If one market has a buy signal, enter that market.
 4. While holding, monitor that market for sell timing.
 5. If a sell signal appears, exit.
-6. Resume scanning all 9 markets for the next buy signal.
+6. Resume scanning all 15 markets for the next buy signal.
 7. If two or more buy signals appear at the same time, choose the stronger signal or the higher-quality market.
 8. If a better buy signal appears while already holding another market, compare:
    - current position expected return

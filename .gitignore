@@ -9,8 +9,10 @@ dist/
 .claude/
 .claire/
 data/market/*.json
+data/market/*.tmp
 data/local/**
 !data/local/
 !data/local/traders/
 !data/local/traders/.gitkeep
 public/market/*.json
+public/market/*.tmp

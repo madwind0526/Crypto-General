@@ -72,6 +72,7 @@ export class PaperTradingSession {
 
   private cash: number;
   private readonly config: BacktestConfig;
+  private readonly slip: (price: number) => number;
   private readonly guideRuleMode: GuideRuleMode;
   private readonly autoBlockMode: SafetyMode;
   private readonly scenarioById: Map<string, StrategyScenario>;
@@ -93,6 +94,7 @@ export class PaperTradingSession {
   ) {
     const resolved = resolveOptions(options);
     this.config = resolved.config;
+    this.slip = (price: number) => resolved.config.dynamicSlippage ? resolved.config.dynamicSlippage(price) : resolved.config.slippageRate;
     this.guideRuleMode = resolved.guideRuleMode;
     this.autoBlockMode = resolved.autoBlockMode;
     this.initialCash = resolved.config.initialCash;
@@ -214,7 +216,7 @@ export class PaperTradingSession {
       const candle = candlesAtTime.get(this.position.market)?.candle;
       if (candle) {
         const basePrice = options.executionPrices?.get(this.position.market) ?? candle.close;
-        const exitPrice = basePrice * (1 - this.config.slippageRate);
+        const exitPrice = basePrice * (1 - this.slip(basePrice));
         this.cash += this.closePosition(this.position, exitPrice, timestamp, decision.reasonCodes);
         this.lastSellPriceByMarket.set(this.position.market, exitPrice);
         this.position = null;
@@ -227,7 +229,7 @@ export class PaperTradingSession {
       if (candle && this.cash > 0) {
         const budget = this.cash;
         const basePrice = options.executionPrices?.get(decision.buyMarket) ?? candle.close;
-        const fillPrice = basePrice * (1 + this.config.slippageRate);
+        const fillPrice = basePrice * (1 + this.slip(basePrice));
         const fee = budget * this.config.feeRate;
         const quantity = Math.max(0, (budget - fee) / fillPrice);
         if (quantity > 0) {
@@ -275,7 +277,7 @@ export class PaperTradingSession {
       const candles = candlesByMarket[this.position.market] ?? [];
       const last = candles[this.marketPointers.get(this.position.market) ?? candles.length - 1] ?? candles[candles.length - 1];
       if (last) {
-        const exitPrice = last.close * (1 - this.config.slippageRate);
+        const exitPrice = last.close * (1 - this.slip(last.close));
         this.cash += this.closePosition(this.position, exitPrice, last.timestamp, ["paper-final-close"]);
         this.lastSellPriceByMarket.set(this.position.market, exitPrice);
         this.position = null;
@@ -348,7 +350,7 @@ export class PaperTradingSession {
     if (triggeredStops.length > 0 || takeProfitTriggered) {
       const exitedMarket = this.position.market;
       const exitBasePrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
-      const exitPrice = exitBasePrice * (1 - this.config.slippageRate);
+      const exitPrice = exitBasePrice * (1 - this.slip(exitBasePrice));
       this.cash += this.closePosition(this.position, exitPrice, timestamp, ["risk-rule-exit"]);
       this.lastSellPriceByMarket.set(exitedMarket, exitPrice);
       riskExitedMarkets.add(exitedMarket);

@@ -7,15 +7,15 @@
  *   3. node scripts/live-trader.mjs             (실제 주문 실행)
  *
  * 자금 배분:
- *   TOTAL_BUDGET (기본 1,000,000원) ÷ 9코인 = 코인당 111,111원
- *   C 전략 targetWeight 0.45 → 매수금액 ≈ 50,000원/회
+ *   TOTAL_BUDGET (기본 1,000,000원) ÷ 15코인 = 코인당 66,666원
+ *   E 전략 targetWeight 0.9 → 매수금액 ≈ 60,000원/회
  */
 import "dotenv/config";
 import WebSocket from "ws";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { cancelOrder, getAccounts, getKrwBalance, getOrder, placeMarketBuy, placeMarketSell } from "./upbitOrder";
-import { arbitrageStrategy } from "../src/strategies/arbitrage";
+import { averageDropCycleStrategy } from "../src/strategies/averageDropCycle";
 import type { Candle, StrategyContext } from "../src/types/trading";
 
 // ── 설정 ────────────────────────────────────────────────────────────────────
@@ -26,9 +26,9 @@ const LIVE_ENABLED = process.env.LIVE_TRADING_ENABLED === "true";
 const DRY_RUN = process.argv.includes("--dry-run") || !ACCESS_KEY || !SECRET_KEY || !LIVE_ENABLED;
 
 const TOTAL_BUDGET = Number(process.env.LIVE_BUDGET ?? 1_000_000);   // 총 운용금액 (KRW)
-const MAX_COINS = 9;
+const MAX_COINS = 15;
 const BUDGET_PER_COIN = Math.floor(TOTAL_BUDGET / MAX_COINS);         // 코인당 할당 예산
-const TARGET_WEIGHT = 0.45;                                            // arbitrage targetWeight
+const TARGET_WEIGHT = 0.9;                                             // general-e targetWeight (100,000원/회)
 const ORDER_AMOUNT = Math.floor(BUDGET_PER_COIN * TARGET_WEIGHT);     // 1회 매수금액
 const MIN_ORDER_KRW = 5_500;                                           // 업비트 최소 주문 + 여유
 const MAX_DAILY_LOSS_KRW = Number(process.env.MAX_DAILY_LOSS_KRW ?? Math.floor(TOTAL_BUDGET * 0.10)); // 기본 10%
@@ -36,8 +36,11 @@ const MAX_DAILY_LOSS_KRW = Number(process.env.MAX_DAILY_LOSS_KRW ?? Math.floor(T
 const root = process.cwd();
 const statePath = path.join(root, "data", "local", "live-trader-state.json");
 const publicStatusPath = path.join(root, "public", "market", "live-trade-status.json");
-const planDir = path.join(root, "data", "local", "traders", "arbitrage");
+const lockPath = path.join(root, "data", "local", "live-trader.lock");
+const planDir = path.join(root, "data", "local", "traders", "general-e");
 const maxCandles = 1440;
+const minPrice = Number(process.env.LIVE_MIN_PRICE ?? 100);
+const maxPrice = Number(process.env.LIVE_MAX_PRICE ?? 10_000);
 
 const wsUrl = "wss://api.upbit.com/websocket/v1";
 
@@ -51,6 +54,15 @@ interface LivePosition {
   orderUuid: string;
 }
 
+interface PortfolioSnapshot {
+  krwCash: number;
+  invested: number;
+  coinValue: number;
+  totalValue: number;
+  pnl: number;
+  at: string;
+}
+
 interface LiveState {
   startedAt: string;
   totalBudget: number;
@@ -58,7 +70,8 @@ interface LiveState {
   positions: Record<string, LivePosition>;   // market → position
   trades: LiveTradeLog[];
   lastSellAt: Record<string, number>;        // market → candle timestamp
-  startBalance?: number;                     // 최초 시작 시 총 평가액 (한 번만 기록)
+  startBalance?: number;                      // 최초 시작 시 총 평가액
+  startSnapshot?: PortfolioSnapshot;          // 기동 시 포트폴리오 스냅샷 (UI 잔고 현황용, 변경 안됨)
   pendingBuys?: Record<string, PendingBuy>;   // uuid → 미완료 매수 주문
   pendingSells?: Record<string, PendingSell>; // uuid → 미완료 매도 주문
 }
@@ -72,6 +85,7 @@ interface LiveTradeLog {
   actualPrice?: number;    // 실제 체결가 (Upbit 조회값)
   netKrw?: number;         // 실수령 KRW: 매수=지출액, 매도=executed_funds - paid_fee
   pnlKrw?: number;         // 실현 손익 (매도시): netKrw - 매수 원가
+  portfolioAfter?: PortfolioSnapshot; // 체결 직후 현금+관리 코인 평가 스냅샷
   dryRun: boolean;
   reasonCodes: string[];
 }
@@ -83,6 +97,7 @@ interface PendingBuy {
   price: number;       // 추정 체결가
   reasonCodes: string[];
   at: string;          // ISO timestamp
+  recordedVolume?: string; // 이미 state에 반영한 체결량
 }
 
 interface PendingSell {
@@ -93,6 +108,7 @@ interface PendingSell {
   reasonCodes: string[];
   at: string;          // ISO timestamp
   costBasis: number;   // avgBuyPrice × quantity (손익 계산용)
+  recordedVolume?: string; // 이미 trade log에 반영한 매도 체결량
 }
 
 // ── 캔들 버퍼 ────────────────────────────────────────────────────────────────
@@ -110,6 +126,7 @@ const marketScenario = new Map<string, import("../src/types/trading").StrategySc
 
 // 동시 실행 방지
 let saveChain: Promise<void> = Promise.resolve();
+let reconcileChain: Promise<void> = Promise.resolve();
 const orderInProgress = new Set<string>(); // 매수/매도 진행 중인 마켓
 
 // 비상 정지 파일 경로
@@ -124,6 +141,9 @@ let cachedKrwCashAt = 0;
 
 // 공개 상태 파일 단조 증가 시퀀스 — UI의 역순/오래된 응답 거부에 사용
 let statusSequence = 0;
+const writerRunId = `${process.pid}-${Date.now()}`;
+let lockHandle: Awaited<ReturnType<typeof open>> | null = null;
+let statusPublishingEnabled = false;
 
 // WebSocket 싱글턴
 let activeWs: WebSocket | null = null;
@@ -139,9 +159,76 @@ async function isAllTradesBlocked(): Promise<boolean> {
   try { await access(freezeAllPath); return true; } catch { return false; }
 }
 
+async function acquireProcessLock() {
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      lockHandle = await open(lockPath, "wx");
+      await lockHandle.writeFile(JSON.stringify({
+        pid: process.pid,
+        writerRunId,
+        startedAt: new Date().toISOString(),
+        mode: DRY_RUN ? "dry-run" : "live",
+      }, null, 2), "utf8");
+      console.log(`[live-trader] lock 획득: ${lockPath}`);
+      return;
+    } catch (e) {
+      const error = e as NodeJS.ErrnoException;
+      if (error.code !== "EEXIST") throw e;
+
+      const lock = await readLockFile();
+      if (lock?.pid && isProcessAlive(lock.pid)) {
+        throw new Error(`live-trader가 이미 실행 중입니다. pid=${lock.pid}, startedAt=${lock.startedAt ?? "unknown"}`);
+      }
+
+      console.warn("[live-trader] stale lock 감지 — 제거 후 재시도");
+      await unlink(lockPath).catch(() => {});
+    }
+  }
+  throw new Error("live-trader lock 획득 실패");
+}
+
+async function readLockFile(): Promise<{ pid?: number; startedAt?: string } | null> {
+  try {
+    return JSON.parse(await readFile(lockPath, "utf8")) as { pid?: number; startedAt?: string };
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const error = e as NodeJS.ErrnoException;
+    return error.code === "EPERM";
+  }
+}
+
+async function releaseProcessLock() {
+  const handle = lockHandle;
+  lockHandle = null;
+  if (!handle) return;
+  try {
+    await handle.close();
+  } catch {}
+
+  try {
+    const lock = await readLockFile();
+    if (!lock?.pid || lock.pid === process.pid) {
+      await unlink(lockPath);
+      console.log("[live-trader] lock 해제");
+    }
+  } catch {}
+}
+
 // ── 초기화 ───────────────────────────────────────────────────────────────────
 
 async function init() {
+  await acquireProcessLock();
+
   if (DRY_RUN) {
     console.log("[live-trader] ⚠️  DRY RUN 모드 — 실제 주문 없음");
     if (!ACCESS_KEY) console.log("[live-trader] 이유: UPBIT_ACCESS_KEY 미설정");
@@ -157,10 +244,11 @@ async function init() {
   const plan = JSON.parse(await readFile(planPath, "utf8")) as {
     selectedMarkets: { market: string; bestResult: { scenarioId: string } }[];
   };
-  selectedMarkets = plan.selectedMarkets.map((m) => m.market);
+  selectedMarkets = await filterKnownOutOfRangeMarkets(plan.selectedMarkets.map((m) => m.market));
   for (const item of plan.selectedMarkets) {
-    const scenario = arbitrageStrategy.scenarios.find((s) => s.id === item.bestResult.scenarioId)
-      ?? arbitrageStrategy.defaultScenario;
+    if (!selectedMarkets.includes(item.market)) continue;
+    const scenario = averageDropCycleStrategy.scenarios.find((s) => s.id === item.bestResult.scenarioId)
+      ?? averageDropCycleStrategy.defaultScenario;
     marketScenario.set(item.market, scenario);
   }
   console.log(`[live-trader] 대상 코인 (${selectedMarkets.length}개): ${selectedMarkets.map((m) => m.replace("KRW-", "")).join(", ")}`);
@@ -181,11 +269,30 @@ async function init() {
     await reconcilePendingSells();
   }
 
+  await resetStartBalanceForRun();
+  statusPublishingEnabled = true;
+
   console.log(`[live-trader] 코인당 예산: ${BUDGET_PER_COIN.toLocaleString()}원 | 1회 매수: ${ORDER_AMOUNT.toLocaleString()}원`);
   console.log(`[live-trader] 현재 포지션: ${Object.keys(state.positions).length}개`);
 
   await writePublicStatus(state);
   connect();
+}
+
+async function filterKnownOutOfRangeMarkets(markets: string[]) {
+  const cachePath = path.join(root, "data", "market", "upbit-krw-1m-daily.json");
+  try {
+    const cache = JSON.parse(await readFile(cachePath, "utf8")) as { candlesByMarket: Record<string, Candle[]> };
+    return markets.filter((market) => {
+      const candles = cache.candlesByMarket[market] ?? [];
+      const lastPrice = candles[candles.length - 1]?.close;
+      const keep = lastPrice === undefined || (lastPrice >= minPrice && lastPrice <= maxPrice);
+      if (!keep) console.warn(`[live-trader] 제외 ${market}: ${lastPrice}원은 ${minPrice}~${maxPrice}원 범위 밖입니다.`);
+      return keep;
+    });
+  } catch {
+    return markets;
+  }
 }
 
 async function loadCandleHistory() {
@@ -204,7 +311,12 @@ async function loadCandleHistory() {
 
 async function loadState(): Promise<LiveState> {
   try {
-    return JSON.parse(await readFile(statePath, "utf8")) as LiveState;
+    const loaded = JSON.parse(await readFile(statePath, "utf8")) as LiveState;
+    return {
+      ...loaded,
+      totalBudget: TOTAL_BUDGET,
+      budgetPerCoin: BUDGET_PER_COIN,
+    };
   } catch {
     const fresh: LiveState = {
       startedAt: new Date().toISOString(),
@@ -225,7 +337,7 @@ async function saveState(s: LiveState): Promise<void> {
   const snapshot = JSON.stringify(s, null, 2);
   await (saveChain = saveChain.catch(() => {}).then(async () => {
     await mkdir(path.dirname(statePath), { recursive: true });
-    const tmp = statePath + ".tmp";
+    const tmp = `${statePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, snapshot, "utf8");
     await rename(tmp, statePath);
     await writePublicStatus(s);
@@ -233,43 +345,113 @@ async function saveState(s: LiveState): Promise<void> {
 }
 
 async function computeBalance(s: LiveState) {
-  const safe = (v: number) => (isFinite(v) ? v : 0);
+  const snapshot = await computePortfolioSnapshot(s);
+  return {
+    krwCash: snapshot.krwCash,
+    invested: snapshot.invested,
+    currentValue: snapshot.coinValue,
+    totalValue: snapshot.totalValue,
+    unrealizedPnl: snapshot.pnl,
+  };
+}
+
+async function computePortfolioSnapshot(s: LiveState, accounts?: Awaited<ReturnType<typeof getAccounts>>): Promise<PortfolioSnapshot> {
+  const safe = (v: number) => (Number.isFinite(v) ? v : 0);
   const positions = Object.values(s.positions);
-  const invested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
-  const currentValue = safe(positions.reduce((sum, p) => {
-    const candles = closedCandles[p.market];
-    const latestPrice = safe(candles?.[candles.length - 1]?.close ?? p.avgBuyPrice);
-    return sum + safe(parseFloat(p.quantity)) * latestPrice;
+  const localInvested = safe(positions.reduce((sum, p) => sum + safe(parseFloat(p.quantity)) * safe(p.avgBuyPrice), 0));
+  const localCoinValue = safe(positions.reduce((sum, p) => {
+    return sum + safe(parseFloat(p.quantity)) * getLatestPrice(p.market, p.avgBuyPrice);
   }, 0));
 
   if (DRY_RUN) {
-    const krwCash = Math.max(0, s.totalBudget - invested);
-    return { krwCash, invested, currentValue, totalValue: krwCash + currentValue, unrealizedPnl: currentValue - invested };
+    const krwCash = Math.max(0, s.totalBudget - localInvested);
+    return {
+      krwCash,
+      invested: localInvested,
+      coinValue: localCoinValue,
+      totalValue: krwCash + localCoinValue,
+      pnl: localCoinValue - localInvested,
+      at: new Date().toISOString(),
+    };
   }
 
-  // getAccounts 호출을 60초에 1회로 제한 — 호출이 느릴 경우 saveChain 장기 블로킹 방지
-  const now = Date.now();
-  if (cachedKrwCash === null || now - cachedKrwCashAt > 60_000) {
-    try {
-      const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
-      const krwAccount = accounts.find((a) => a.currency === "KRW");
-      cachedKrwCash = safe(krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0);
-      cachedKrwCashAt = Date.now();
-    } catch {
-      if (cachedKrwCash === null) cachedKrwCash = Math.max(0, s.totalBudget - invested);
+  // accounts 명시 전달 없으면 30초 TTL 캐시 사용 — saveChain 내 연속 API 호출 방지
+  const useCache = !accounts && cachedKrwCash !== null && Date.now() - cachedKrwCashAt < 30_000;
+
+  try {
+    const freshAccounts = accounts ?? (useCache ? null : await getAccounts(ACCESS_KEY, SECRET_KEY));
+    if (!freshAccounts) {
+      // 캐시 유효 구간: krwCash 캐시 + 로컬 코인가치 사용
+      return {
+        krwCash: cachedKrwCash!,
+        invested: localInvested,
+        coinValue: localCoinValue,
+        totalValue: cachedKrwCash! + localCoinValue,
+        pnl: localCoinValue - localInvested,
+        at: new Date().toISOString(),
+      };
     }
-  }
+    const krwAccount = freshAccounts.find((a) => a.currency === "KRW");
+    const krwCash = safe(krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0);
+    cachedKrwCash = krwCash;
+    cachedKrwCashAt = Date.now();
 
-  const krwCash = cachedKrwCash;
-  return { krwCash, invested, currentValue, totalValue: krwCash + currentValue, unrealizedPnl: currentValue - invested };
+    let accountCoinValue = 0;
+    let accountInvested = 0;
+    for (const market of selectedMarkets) {
+      const account = freshAccounts.find((a) => a.currency === market.replace("KRW-", ""));
+      if (!account) continue;
+      const qty = safe(parseFloat(account.balance) + parseFloat(account.locked));
+      if (qty <= 0) continue;
+      const avgBuyPrice = safe(parseFloat(account.avg_buy_price));
+      accountInvested += qty * avgBuyPrice;
+      accountCoinValue += qty * getLatestPrice(market, avgBuyPrice);
+    }
+
+    return {
+      krwCash,
+      invested: accountInvested,
+      coinValue: accountCoinValue,
+      totalValue: krwCash + accountCoinValue,
+      pnl: accountCoinValue - accountInvested,
+      at: new Date().toISOString(),
+    };
+  } catch {
+    const krwCash = cachedKrwCash ?? Math.max(0, s.totalBudget - localInvested);
+    return {
+      krwCash,
+      invested: localInvested,
+      coinValue: localCoinValue,
+      totalValue: krwCash + localCoinValue,
+      pnl: localCoinValue - localInvested,
+      at: new Date().toISOString(),
+    };
+  }
+}
+
+function getLatestPrice(market: string, fallback: number) {
+  return liveCandle[market]?.close
+    ?? closedCandles[market]?.[closedCandles[market].length - 1]?.close
+    ?? fallback;
+}
+
+async function resetStartBalanceForRun() {
+  const snapshot = await computePortfolioSnapshot(state);
+  state.startedAt = snapshot.at;
+  state.startBalance = snapshot.totalValue;
+  state.startSnapshot = snapshot;
+  console.log(`[live-trader] 시작 잔고 재계산: ${Math.floor(state.startBalance).toLocaleString()}원 (현금 ${Math.floor(snapshot.krwCash).toLocaleString()}원 + 코인 ${Math.floor(snapshot.coinValue).toLocaleString()}원)`);
+  await saveState(state);
 }
 
 async function writePublicStatus(s: LiveState) {
+  if (!statusPublishingEnabled) return;
   const balance = await computeBalance(s);
   const now = new Date().toISOString();
   const payload = {
     schemaVersion: 1,
     writerPid: process.pid,
+    writerRunId,
     sequence: ++statusSequence,
     stateUpdatedAt: now,
     updatedAt: now,
@@ -282,10 +464,11 @@ async function writePublicStatus(s: LiveState) {
     lastSellAt: s.lastSellAt,
     balance,
     startBalance: s.startBalance,
+    startSnapshot: s.startSnapshot,
   };
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
-    const tmp = publicStatusPath + ".tmp";
+    const tmp = `${publicStatusPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, JSON.stringify(payload), "utf8");
     await rename(tmp, publicStatusPath);
   } catch (e) {
@@ -296,13 +479,14 @@ async function writePublicStatus(s: LiveState) {
 async function syncPositionsFromUpbit() {
   try {
     const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
+    const syncedPositions: Record<string, LivePosition> = {};
     for (const market of selectedMarkets) {
       const currency = market.replace("KRW-", "");
       const account = accounts.find((a) => a.currency === currency);
       if (account && parseFloat(account.balance) > 0) {
         // 이미 상태에 없으면 현재 보유량으로 초기화
         if (!state.positions[market]) {
-          state.positions[market] = {
+          syncedPositions[market] = {
             market,
             quantity: account.balance,
             avgBuyPrice: parseFloat(account.avg_buy_price),
@@ -313,23 +497,11 @@ async function syncPositionsFromUpbit() {
         }
       }
     }
-    // 최초 기동 시에만 시작 잔고 기록 (재기동 시 덮어쓰지 않음)
-    if (state.startBalance === undefined) {
-      const krwAccount = accounts.find((a) => a.currency === "KRW");
-      const krwCash = krwAccount ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked) : 0;
-      const posVal = Object.values(state.positions).reduce((sum, p) => {
-        const candles = closedCandles[p.market];
-        const price = candles?.[candles.length - 1]?.close ?? p.avgBuyPrice;
-        return sum + parseFloat(p.quantity) * price;
-      }, 0);
-      state.startBalance = krwCash + posVal;
-      console.log(`[live-trader] 시작 잔고 기록 (최초): ${Math.floor(state.startBalance).toLocaleString()}원 (현금 ${Math.floor(krwCash).toLocaleString()}원 + 코인 ${Math.floor(posVal).toLocaleString()}원)`);
-    } else {
-      console.log(`[live-trader] 시작 잔고 유지: ${Math.floor(state.startBalance).toLocaleString()}원`);
-    }
+    state.positions = syncedPositions;
     await saveState(state);
   } catch (e) {
     console.error("[live-trader] 잔고 동기화 실패:", e);
+    throw e;
   }
 }
 
@@ -339,44 +511,38 @@ async function reconcilePendingBuys() {
   console.log(`[live-trader] 미완료 매수 주문 정산 (${Object.keys(pending).length}건)...`);
   for (const [uuid, pb] of Object.entries(pending)) {
     try {
-      const filled = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
-      if (filled.state === "done") {
-        const executedVolume = parseFloat(filled.executed_volume ?? "0");
-        if (executedVolume > 0 && !state.positions[pb.market]) {
-          const actualPrice = filled.avg_price ? parseFloat(filled.avg_price) : pb.price;
-          state.positions[pb.market] = { market: pb.market, quantity: String(executedVolume), avgBuyPrice: actualPrice, entryAt: pb.at, orderUuid: uuid };
-          state.trades.push({ at: pb.at, market: pb.market, side: "buy", amount: pb.amount, price: pb.price, actualPrice, netKrw: pb.amount, dryRun: false, reasonCodes: pb.reasonCodes });
-          console.log(`[live-trader] ✅ 펜딩 매수 완료 정산: ${pb.market} ${executedVolume}개 @ ${actualPrice.toLocaleString()}원`);
-        }
-      } else if (filled.state === "wait" || filled.state === "watch") {
-        let cancelOk = false;
+      let order = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+      if (order.state === "wait" || order.state === "watch") {
         try {
           await cancelOrder(ACCESS_KEY, SECRET_KEY, uuid);
-          cancelOk = true;
           console.log(`[live-trader] 🗑️ 미체결 매수 취소: ${uuid} (${pb.market})`);
         } catch (cancelErr) {
           console.error(`[live-trader] 미체결 매수 취소 실패 (${uuid}):`, cancelErr);
+          continue;
         }
-        if (cancelOk) {
-          // 취소 후 재조회 — 부분 체결 수량 확인 후 포지션 반영
-          try {
-            const afterCancel = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
-            const partialVol = parseFloat(afterCancel.executed_volume ?? "0");
-            if (partialVol > 0 && !state.positions[pb.market]) {
-              const actualPrice = afterCancel.avg_price ? parseFloat(afterCancel.avg_price) : pb.price;
-              const netKrw = afterCancel.executed_funds ? parseFloat(afterCancel.executed_funds) : partialVol * actualPrice;
-              state.positions[pb.market] = { market: pb.market, quantity: String(partialVol), avgBuyPrice: actualPrice, entryAt: pb.at, orderUuid: uuid };
-              state.trades.push({ at: pb.at, market: pb.market, side: "buy", amount: pb.amount, price: pb.price, actualPrice, netKrw, dryRun: false, reasonCodes: pb.reasonCodes });
-              console.log(`[live-trader] ⚠️ 부분 체결 포지션 기록: ${pb.market} ${partialVol}개 @ ${actualPrice.toLocaleString()}원`);
-            }
-          } catch (reQueryErr) {
-            console.error(`[live-trader] 취소 후 재조회 실패 (${uuid}):`, reQueryErr);
-            // 재조회 실패 시 펜딩 유지 (다음 기동 시 재시도)
-            continue;
-          }
+
+        try {
+          order = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+        } catch (reQueryErr) {
+          console.error(`[live-trader] 취소 후 재조회 실패 (${uuid}):`, reQueryErr);
+          continue;
         }
+      }
+
+      const executedVolume = parseFloat(order.executed_volume ?? "0");
+      if (executedVolume > 0) {
+        await recordBuyFill(pb, order);
+      }
+
+      if (order.state === "wait" || order.state === "watch") {
+        console.log(`[live-trader] 매수 여전히 미체결: ${uuid} (${pb.market}, state=${order.state})`);
+        continue;
+      }
+
+      if (executedVolume <= 0) {
+        console.log(`[live-trader] 매수 체결 없음: ${uuid} (${pb.market}, state=${order.state})`);
       } else {
-        console.log(`[live-trader] 매수 이미 취소됨: ${uuid} (${pb.market})`);
+        console.log(`[live-trader] ✅ 펜딩 매수 정산 완료: ${pb.market} ${executedVolume}개`);
       }
       delete pending[uuid];
     } catch (e) {
@@ -393,23 +559,18 @@ async function reconcilePendingSells() {
   for (const [uuid, ps] of Object.entries(pending)) {
     try {
       const filled = await getOrder(ACCESS_KEY, SECRET_KEY, uuid);
+      const executedVolume = parseFloat(filled.executed_volume ?? "0");
+      if (executedVolume > 0) {
+        await recordSellFill(ps, filled);
+      }
+
       if (filled.state === "done") {
-        const actualPrice = filled.avg_price ? parseFloat(filled.avg_price) : undefined;
-        const netKrw = filled.executed_funds && filled.paid_fee
-          ? parseFloat(filled.executed_funds) - parseFloat(filled.paid_fee)
-          : undefined;
-        const pnlKrw = netKrw !== undefined ? netKrw - ps.costBasis : undefined;
-        const candleTs = closedCandles[ps.market]?.[closedCandles[ps.market].length - 1]?.timestamp;
-        if (candleTs) state.lastSellAt[ps.market] = candleTs;
-        delete state.positions[ps.market];
-        state.trades.push({ at: ps.at, market: ps.market, side: "sell", amount: parseFloat(ps.quantity), price: ps.price, actualPrice, netKrw, pnlKrw, dryRun: false, reasonCodes: ps.reasonCodes });
-        console.log(`[live-trader] ✅ 펜딩 매도 완료 정산: ${ps.market} @ ${actualPrice?.toLocaleString() ?? "?"}원`);
+        console.log(`[live-trader] ✅ 펜딩 매도 완료 정산: ${ps.market}`);
         delete pending[uuid];
       } else if (filled.state === "wait" || filled.state === "watch") {
         console.log(`[live-trader] 매도 여전히 미체결: ${uuid} (${ps.market}, state=${filled.state})`);
       } else {
-        // cancel — 포지션을 복원하지 않음 (이미 exchange에서 처리된 것으로 간주)
-        console.warn(`[live-trader] ⚠️ 매도 취소됨: ${uuid} (${ps.market}) — 수동 확인 필요`);
+        console.warn(`[live-trader] ⚠️ 매도 취소됨: ${uuid} (${ps.market}, 체결 ${executedVolume}개)`);
         delete pending[uuid];
       }
     } catch (e) {
@@ -417,6 +578,115 @@ async function reconcilePendingSells() {
     }
   }
   await saveState(state);
+}
+
+async function recordBuyFill(pb: PendingBuy, order: Awaited<ReturnType<typeof getOrder>>) {
+  const executedVolume = parseFloat(order.executed_volume ?? "0");
+  const alreadyRecorded = parseFloat(pb.recordedVolume ?? "0");
+  const deltaVolume = executedVolume - alreadyRecorded;
+  if (deltaVolume <= 0) return;
+
+  const actualPrice = order.avg_price ? parseFloat(order.avg_price) : pb.price;
+  const executedFunds = order.executed_funds ? parseFloat(order.executed_funds) : executedVolume * actualPrice;
+  const previousFunds = alreadyRecorded * actualPrice;
+  const deltaFunds = Math.max(0, executedFunds - previousFunds);
+
+  const existingPosition = state.positions[pb.market];
+  if (existingPosition && existingPosition.orderUuid !== pb.uuid) {
+    // Startup sync may already have absorbed this exchange exposure.
+    console.warn(`[live-trader] 펜딩 매수 ${pb.market} 체결량은 기존 포지션에 이미 반영된 것으로 간주합니다.`);
+    pb.recordedVolume = String(executedVolume);
+    return;
+  }
+
+  if (existingPosition) {
+    const currentQty = parseFloat(existingPosition.quantity);
+    const nextQty = currentQty + deltaVolume;
+    existingPosition.avgBuyPrice = nextQty > 0
+      ? ((currentQty * existingPosition.avgBuyPrice) + deltaFunds) / nextQty
+      : actualPrice;
+    existingPosition.quantity = String(nextQty);
+  } else {
+    state.positions[pb.market] = {
+      market: pb.market,
+      quantity: String(deltaVolume),
+      avgBuyPrice: actualPrice,
+      entryAt: pb.at,
+      orderUuid: pb.uuid,
+    };
+  }
+
+  state.trades.push({
+    at: pb.at,
+    market: pb.market,
+    side: "buy",
+    amount: deltaFunds || pb.amount,
+    price: pb.price,
+    actualPrice,
+    netKrw: deltaFunds || pb.amount,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: false,
+    reasonCodes: pb.reasonCodes,
+  });
+  pb.recordedVolume = String(executedVolume);
+}
+
+async function recordSellFill(ps: PendingSell, order: Awaited<ReturnType<typeof getOrder>>) {
+  const executedVolume = parseFloat(order.executed_volume ?? "0");
+  const alreadyRecorded = parseFloat(ps.recordedVolume ?? "0");
+  const deltaVolume = executedVolume - alreadyRecorded;
+  if (deltaVolume <= 0) return;
+
+  const actualPrice = order.avg_price ? parseFloat(order.avg_price) : undefined;
+  const executedFunds = order.executed_funds ? parseFloat(order.executed_funds) : undefined;
+  const paidFee = order.paid_fee ? parseFloat(order.paid_fee) : 0;
+  const previousRatio = alreadyRecorded / Math.max(parseFloat(ps.quantity), 1e-12);
+  const currentRatio = executedVolume / Math.max(parseFloat(ps.quantity), 1e-12);
+  const netKrw = executedFunds !== undefined
+    ? Math.max(0, executedFunds * (currentRatio - previousRatio) / Math.max(currentRatio, 1e-12) - paidFee * (currentRatio - previousRatio) / Math.max(currentRatio, 1e-12))
+    : undefined;
+  const costBasis = ps.costBasis * (deltaVolume / Math.max(parseFloat(ps.quantity), 1e-12));
+  const pnlKrw = netKrw !== undefined ? netKrw - costBasis : undefined;
+  const candleTs = closedCandles[ps.market]?.[closedCandles[ps.market].length - 1]?.timestamp;
+  if (candleTs) state.lastSellAt[ps.market] = candleTs;
+
+  const position = state.positions[ps.market];
+  if (position) {
+    const remaining = Math.max(0, parseFloat(position.quantity) - deltaVolume);
+    if (remaining <= 1e-10) delete state.positions[ps.market];
+    else position.quantity = String(remaining);
+  }
+
+  state.trades.push({
+    at: ps.at,
+    market: ps.market,
+    side: "sell",
+    amount: deltaVolume,
+    price: ps.price,
+    actualPrice,
+    netKrw,
+    pnlKrw,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: false,
+    reasonCodes: ps.reasonCodes,
+  });
+  ps.recordedVolume = String(executedVolume);
+}
+
+function hasPendingOrders() {
+  return Boolean(
+    (state.pendingBuys && Object.keys(state.pendingBuys).length > 0) ||
+    (state.pendingSells && Object.keys(state.pendingSells).length > 0),
+  );
+}
+
+function queuePendingReconcile(reason: string) {
+  if (DRY_RUN || !state || !hasPendingOrders()) return;
+  reconcileChain = reconcileChain.catch(() => {}).then(async () => {
+    console.log(`[live-trader] pending 주문 재정산 (${reason})`);
+    await reconcilePendingBuys();
+    await reconcilePendingSells();
+  });
 }
 
 // ── WebSocket 연결 ───────────────────────────────────────────────────────────
@@ -596,7 +866,7 @@ async function processMinuteClose(market: string, _closedCandle: Candle) {
     }
   }
 
-  const decision = arbitrageStrategy.decide(context, scenario);
+  const decision = averageDropCycleStrategy.decide(context, scenario);
 
   if (decision.action === "buy" && !position) {
     await executeBuy(market, candles[candleIndex].close, decision.reasonCodes);
@@ -606,13 +876,17 @@ async function processMinuteClose(market: string, _closedCandle: Candle) {
 }
 
 function getScenarioForMarket(market: string) {
-  return marketScenario.get(market) ?? arbitrageStrategy.defaultScenario;
+  return marketScenario.get(market) ?? averageDropCycleStrategy.defaultScenario;
 }
 
 // ── 주문 실행 ────────────────────────────────────────────────────────────────
 
 async function executeBuy(market: string, price: number, reasonCodes: string[]) {
   if (orderInProgress.has(market)) return; // 이미 주문 진행 중
+  if (state.pendingBuys && Object.values(state.pendingBuys).some((pb) => pb.market === market)) {
+    console.warn(`[live-trader] ⚠️ 매수 스킵 — 미완료 매수 주문이 있음: ${market}`);
+    return;
+  }
   orderInProgress.add(market);
 
   try {
@@ -637,15 +911,17 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
 
     // 최대 포지션 수 / 예산 초과 체크
     const openCount = Object.keys(state.positions).length;
-    if (openCount >= MAX_COINS) {
-      console.log(`[live-trader] 스킵 — 최대 포지션 수 도달 (${openCount}/${MAX_COINS})`);
+    const pendingBuyCount = state.pendingBuys ? Object.keys(state.pendingBuys).length : 0;
+    if (openCount + pendingBuyCount >= MAX_COINS) {
+      console.log(`[live-trader] 스킵 — 최대 포지션 수 도달 (${openCount}+pending ${pendingBuyCount}/${MAX_COINS})`);
       return;
     }
     const totalInvested = Object.values(state.positions).reduce(
       (sum, p) => sum + parseFloat(p.quantity) * p.avgBuyPrice, 0,
     );
-    if (totalInvested + ORDER_AMOUNT > TOTAL_BUDGET) {
-      console.log(`[live-trader] 스킵 — 예산 초과 (투자 ${Math.floor(totalInvested).toLocaleString()}원 + ${ORDER_AMOUNT.toLocaleString()}원 > 예산 ${TOTAL_BUDGET.toLocaleString()}원)`);
+    const pendingBuyAmount = Object.values(state.pendingBuys ?? {}).reduce((sum, p) => sum + p.amount, 0);
+    if (totalInvested + pendingBuyAmount + ORDER_AMOUNT > TOTAL_BUDGET) {
+      console.log(`[live-trader] 스킵 — 예산 초과 (투자 ${Math.floor(totalInvested).toLocaleString()}원 + pending ${pendingBuyAmount.toLocaleString()}원 + ${ORDER_AMOUNT.toLocaleString()}원 > 예산 ${TOTAL_BUDGET.toLocaleString()}원)`);
       return;
     }
 
@@ -677,6 +953,7 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
       state.pendingBuys = state.pendingBuys ?? {};
       state.pendingBuys[order.uuid] = { uuid: order.uuid, market, amount: ORDER_AMOUNT, price, reasonCodes, at: new Date().toISOString() };
       await saveState(state);
+      setTimeout(() => queuePendingReconcile("new-pending-buy"), 10_000);
       return;
     }
 
@@ -697,7 +974,18 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
       entryAt: new Date().toISOString(),
       orderUuid: order.uuid,
     };
-    state.trades.push({ at: new Date().toISOString(), market, side: "buy", amount: ORDER_AMOUNT, price, actualPrice, netKrw, dryRun: false, reasonCodes });
+    state.trades.push({
+      at: new Date().toISOString(),
+      market,
+      side: "buy",
+      amount: ORDER_AMOUNT,
+      price,
+      actualPrice,
+      netKrw,
+      portfolioAfter: await computePortfolioSnapshot(state),
+      dryRun: false,
+      reasonCodes,
+    });
     await saveState(state);
   } catch (e) {
     console.error(`[live-trader] ❌ 매수 실패 ${market}:`, e);
@@ -755,6 +1043,7 @@ async function executeSell(market: string, position: LivePosition, price: number
         costBasis: parseFloat(position.quantity) * position.avgBuyPrice,
       };
       await saveState(state);
+      setTimeout(() => queuePendingReconcile("new-pending-sell"), 10_000);
       return;
     }
 
@@ -774,7 +1063,19 @@ async function executeSell(market: string, position: LivePosition, price: number
     if (candleTs) state.lastSellAt[market] = candleTs;
 
     delete state.positions[market];
-    state.trades.push({ at: new Date().toISOString(), market, side: "sell", amount: parseFloat(position.quantity), price, actualPrice, netKrw, pnlKrw, dryRun: false, reasonCodes });
+    state.trades.push({
+      at: new Date().toISOString(),
+      market,
+      side: "sell",
+      amount: parseFloat(position.quantity),
+      price,
+      actualPrice,
+      netKrw,
+      pnlKrw,
+      portfolioAfter: await computePortfolioSnapshot(state),
+      dryRun: false,
+      reasonCodes,
+    });
     await saveState(state);
   } catch (e) {
     console.error(`[live-trader] ❌ 매도 실패 ${market}:`, e);
@@ -797,18 +1098,34 @@ async function recordDryTrade(market: string, side: "buy" | "sell", amount: numb
     if (candleTs) state.lastSellAt[market] = candleTs;
     delete state.positions[market];
   }
-  state.trades.push({ at: new Date().toISOString(), market, side, amount, price, dryRun: true, reasonCodes });
+  state.trades.push({
+    at: new Date().toISOString(),
+    market,
+    side,
+    amount,
+    price,
+    portfolioAfter: await computePortfolioSnapshot(state),
+    dryRun: true,
+    reasonCodes,
+  });
   await saveState(state);
 }
 
 // ── 상태 출력 + 하트비트 ──────────────────────────────────────────────────────
 
+// 미완료 주문은 프로세스 재시작 없이도 계속 exchange 상태와 맞춘다.
+setInterval(() => {
+  queuePendingReconcile("interval");
+}, 15_000);
+
 // 30초마다 공개 상태 파일 갱신 — 거래가 없어도 UI에 최신 updatedAt 유지
 setInterval(() => {
+  if (!state) return;
   writePublicStatus(state).catch((e) => console.error("[live-trader] 하트비트 상태 쓰기 실패:", e));
 }, 30_000);
 
 setInterval(() => {
+  if (!state) return;
   const pos = Object.values(state.positions).map((p) => p.market.replace("KRW-", "")).join(", ") || "없음";
   const trades = state.trades.length;
   console.log(`[live-trader] 포지션: ${pos} | 누적 거래: ${trades}회 | ${DRY_RUN ? "DRY-RUN" : "실매매"}`);
@@ -818,4 +1135,20 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ── 시작 ─────────────────────────────────────────────────────────────────────
 
-init().catch((e) => { console.error("[live-trader] 초기화 실패:", e); process.exit(1); });
+async function shutdown(code: number) {
+  if (activeWs) {
+    try { activeWs.close(); } catch {}
+  }
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  await releaseProcessLock();
+  process.exit(code);
+}
+
+process.once("SIGINT", () => { void shutdown(130); });
+process.once("SIGTERM", () => { void shutdown(143); });
+
+init().catch(async (e) => {
+  console.error("[live-trader] 초기화 실패:", e);
+  await releaseProcessLock();
+  process.exit(1);
+});

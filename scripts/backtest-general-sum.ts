@@ -23,7 +23,7 @@ for (const [market, candles] of Object.entries(allCandles)) {
 }
 
 const config = { ...defaultBacktestConfig, guideRuleMode: "ignored" as const };
-const opts = { candidateMarketCount: 30, monitoringMarketCount: 9, guideRuleMode: "ignored" as const, config };
+const opts = { candidateMarketCount: 30, monitoringMarketCount: 15, guideRuleMode: "ignored" as const, config };
 
 console.log("=".repeat(70));
 console.log("7-Day Backtest: General-Sum vs A-E  (1m candles, ignored guide)");

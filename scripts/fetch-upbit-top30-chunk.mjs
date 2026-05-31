@@ -7,6 +7,8 @@ const startDaysAgo = (chunkIndex + 1) * chunkDays;
 const endDaysAgo = chunkIndex * chunkDays;
 
 process.env.UPBIT_MARKET_COUNT = process.env.UPBIT_MARKET_COUNT ?? "30";
+process.env.UPBIT_MIN_PRICE = process.env.UPBIT_MIN_PRICE ?? "100";
+process.env.UPBIT_MAX_PRICE = process.env.UPBIT_MAX_PRICE ?? "10000";
 process.env.UPBIT_CANDLE_UNIT = process.env.UPBIT_CANDLE_UNIT ?? "5";
 process.env.UPBIT_REQUEST_DELAY_MS = process.env.UPBIT_REQUEST_DELAY_MS ?? "90";
 process.env.UPBIT_PRETTY_JSON = process.env.UPBIT_PRETTY_JSON ?? "false";

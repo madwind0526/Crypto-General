@@ -18,6 +18,8 @@ const DERIVED_CANDLE_PAGES =
       : 6;
 const CANDLE_PAGES = Number(process.env.UPBIT_CANDLE_PAGES ?? DERIVED_CANDLE_PAGES);
 const MARKET_COUNT = Number(process.env.UPBIT_MARKET_COUNT ?? 30);
+const MIN_PRICE = Number(process.env.UPBIT_MIN_PRICE ?? 100);
+const MAX_PRICE = Number(process.env.UPBIT_MAX_PRICE ?? 10_000);
 const REQUEST_DELAY_MS = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 180);
 const MAX_RETRIES = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
 const WRITE_PUBLIC_CACHE = process.env.UPBIT_WRITE_PUBLIC !== "false";
@@ -63,10 +65,25 @@ async function main() {
     .split(",")
     .map((market) => market.trim())
     .filter(Boolean);
+  const allTickers = await fetchTickers(krwMarkets);
+  const pricedTickers = (MIN_PRICE > 0 || MAX_PRICE > 0)
+    ? allTickers.filter((t) => {
+        const p = t.trade_price;
+        if (MIN_PRICE > 0 && p < MIN_PRICE) return false;
+        if (MAX_PRICE > 0 && p > MAX_PRICE) return false;
+        return true;
+      })
+    : allTickers;
+  const pricedMarkets = new Set(pricedTickers.map((ticker) => ticker.market));
+  if (MIN_PRICE > 0 || MAX_PRICE > 0) {
+    const lo = MIN_PRICE > 0 ? `${MIN_PRICE.toLocaleString()}원` : "—";
+    const hi = MAX_PRICE > 0 ? `${MAX_PRICE.toLocaleString()}원` : "—";
+    console.log(`Price filter: ${lo} ~ ${hi}  (${pricedTickers.length}/${allTickers.length} markets pass)`);
+  }
   const selectedMarkets =
     explicitMarkets.length > 0
-      ? explicitMarkets.filter((market) => krwMarkets.includes(market)).slice(0, MARKET_COUNT)
-      : (await fetchTickers(krwMarkets))
+      ? explicitMarkets.filter((market) => krwMarkets.includes(market) && pricedMarkets.has(market)).slice(0, MARKET_COUNT)
+      : pricedTickers
           .slice()
           .sort((a, b) => b.acc_trade_price_24h - a.acc_trade_price_24h)
           .slice(0, MARKET_COUNT)

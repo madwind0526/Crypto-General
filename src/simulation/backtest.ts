@@ -25,6 +25,7 @@ export function runBacktest(
   config: BacktestConfig = defaultBacktestConfig,
 ): BacktestResult {
   const guideRuleMode: GuideRuleMode = config.guideRuleMode ?? "ignored";
+  const slip = (price: number) => config.dynamicSlippage ? config.dynamicSlippage(price) : config.slippageRate;
   let cash = config.initialCash;
   let position: Position | null = null;
   const trades: Trade[] = [];
@@ -61,7 +62,7 @@ export function runBacktest(
         // When multiple stops trigger on the same candle, use the highest price
         // (trailing stop >= fixed stop by construction, so trailing always wins — intentional).
         const exitPrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
-        const roundTripReturn = closePosition(exitPrice * (1 - config.slippageRate), ["risk-rule-exit"], candle.timestamp);
+        const roundTripReturn = closePosition(exitPrice * (1 - slip(exitPrice)), ["risk-rule-exit"], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
         riskExited = true;
       }
@@ -124,7 +125,7 @@ export function runBacktest(
 
     if (finalAction === "buy" && !position && decision.targetWeight > 0) {
       const budget = cash * Math.min(decision.targetWeight, 1);
-      const fillPrice = candle.close * (1 + config.slippageRate);
+      const fillPrice = candle.close * (1 + slip(candle.close));
       const fee = budget * config.feeRate;
       const quantity = Math.max(0, (budget - fee) / fillPrice);
 
@@ -160,7 +161,7 @@ export function runBacktest(
       const keepFraction =
         decision.targetWeight > 0 && decision.targetWeight < 1 ? decision.targetWeight : undefined;
       const roundTripReturn = closePosition(
-        candle.close * (1 - config.slippageRate),
+        candle.close * (1 - slip(candle.close)),
         [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         candle.timestamp,
         guideRuleEvaluation,
@@ -177,7 +178,7 @@ export function runBacktest(
 
   if (position) {
     const last = candles[candles.length - 1];
-    const roundTripReturn = closePosition(last.close * (1 - config.slippageRate), ["final-close"], last.timestamp);
+    const roundTripReturn = closePosition(last.close * (1 - slip(last.close)), ["final-close"], last.timestamp);
     roundTripReturns.push(roundTripReturn);
     // Update the last equity curve point in-place rather than pushing a duplicate
     // timestamp — the main loop already pushed the pre-close value for this candle.

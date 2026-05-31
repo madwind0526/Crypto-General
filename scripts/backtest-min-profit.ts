@@ -24,7 +24,7 @@ const candles7d: Record<string, Candle[]> = {};
 for (const [m, c] of Object.entries(cache.candlesByMarket)) candles7d[m] = c.slice(-maxCandles);
 
 const config = { ...defaultBacktestConfig, guideRuleMode: "ignored" as const };
-const opts = { candidateMarketCount: 30, monitoringMarketCount: 9, guideRuleMode: "ignored" as const, config };
+const opts = { candidateMarketCount: 30, monitoringMarketCount: 15, guideRuleMode: "ignored" as const, config };
 
 function makeRangeGridWithMinProfit(minProfitPct: number): typeof rangeGridStrategy {
   return {

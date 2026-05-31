@@ -87,9 +87,14 @@ export const arbitrageStrategy: Strategy = {
       if (position.holdCandles >= params.maxHoldCandles) {
         return { action: "sell", confidence: 0.58, reasonCodes: ["max-hold-exit"], targetWeight: 0 };
       }
+      // Price-based minimum profit: low-price coins have larger tick-size relative spread.
+      const effectiveMinProfitPct =
+        (params.lowPriceThreshold && current.close < params.lowPriceThreshold)
+          ? (params.lowPriceMinProfitPct ?? minProfitPct)
+          : minProfitPct;
       // Signal exit: z-score recovered AND return reached minimum profit target.
       if (zScore >= params.zExit) {
-        if (returnPct >= minProfitPct) {
+        if (returnPct >= effectiveMinProfitPct) {
           return { action: "sell", confidence: 0.58, reasonCodes: ["relative-value-normalized", "profit-target"], targetWeight: 0 };
         }
         return hold("awaiting-profit-target");

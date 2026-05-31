@@ -99,13 +99,16 @@ function buildAverageDropCycleScenarios() {
   const scenarios: StrategyScenario[] = [];
   const averageWindows = [5, 10, 30, 60];                          // 4
   const entryPcts   = [0.01, 0.02, 0.03, 0.04, 0.05];             // 5 (1–5%)
-  const stopPcts    = [0, 0.01, 0.02, 0.03, 0.04, 0.05];          // 6 (0–5%, 0=disabled)
+  const stopPcts    = [0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06];     // 7 (0–6%, 0=disabled)
   const takePcts    = [0.01, 0.02, 0.03, 0.04, 0.05];             // 5 (1–5%)
   // Total: 4 × 5 × 6 × 5 = 600 scenarios
 
   for (const averageWindowCandles of averageWindows) {
     for (const entryDropPct of entryPcts) {
       for (const avgStopPct of stopPcts) {
+        // stop must be at least drop + 1% so the stop-loss doesn't trigger at entry
+        // Use rounded integer comparison to avoid floating-point artefacts (0.05+0.01 = 0.06000…1)
+        if (Math.round(avgStopPct * 100) < Math.round(entryDropPct * 100) + 1) continue;
         for (const avgTakeProfitPct of takePcts) {
           const p = (entryDropPct * 100).toFixed(0);
           const s = (avgStopPct * 100).toFixed(0);

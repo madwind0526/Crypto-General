@@ -1,5 +1,3 @@
-import { createRequire } from "module"; const require = createRequire(import.meta.url);
-
 // scripts/backtest-d-reentry.ts
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -316,6 +314,7 @@ var defaultBacktestConfig = {
 };
 function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfig) {
   const guideRuleMode = config2.guideRuleMode ?? "ignored";
+  const slip = (price) => config2.dynamicSlippage ? config2.dynamicSlippage(price) : config2.slippageRate;
   let cash = config2.initialCash;
   let position = null;
   const trades = [];
@@ -347,7 +346,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
       const takeProfitTriggered = takeProfitPct > 0 && candle.high >= takeProfit;
       if (triggeredStops.length > 0 || takeProfitTriggered) {
         const exitPrice = triggeredStops.length > 0 ? Math.max(...triggeredStops) : takeProfit;
-        const roundTripReturn = closePosition(exitPrice * (1 - config2.slippageRate), ["risk-rule-exit"], candle.timestamp);
+        const roundTripReturn = closePosition(exitPrice * (1 - slip(exitPrice)), ["risk-rule-exit"], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
         riskExited = true;
       }
@@ -399,7 +398,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
     }
     if (finalAction === "buy" && !position && decision.targetWeight > 0) {
       const budget = cash * Math.min(decision.targetWeight, 1);
-      const fillPrice = candle.close * (1 + config2.slippageRate);
+      const fillPrice = candle.close * (1 + slip(candle.close));
       const fee = budget * config2.feeRate;
       const quantity = Math.max(0, (budget - fee) / fillPrice);
       if (quantity > 0) {
@@ -430,7 +429,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
     if (finalAction === "sell" && position) {
       const keepFraction = decision.targetWeight > 0 && decision.targetWeight < 1 ? decision.targetWeight : void 0;
       const roundTripReturn = closePosition(
-        candle.close * (1 - config2.slippageRate),
+        candle.close * (1 - slip(candle.close)),
         [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         candle.timestamp,
         guideRuleEvaluation,
@@ -445,7 +444,7 @@ function runBacktest(strategy, scenario, candles, config2 = defaultBacktestConfi
   }
   if (position) {
     const last = candles[candles.length - 1];
-    const roundTripReturn = closePosition(last.close * (1 - config2.slippageRate), ["final-close"], last.timestamp);
+    const roundTripReturn = closePosition(last.close * (1 - slip(last.close)), ["final-close"], last.timestamp);
     roundTripReturns.push(roundTripReturn);
     if (equityCurve.length > 0 && equityCurve[equityCurve.length - 1].timestamp === last.timestamp) {
       equityCurve[equityCurve.length - 1].value = cash;
@@ -524,18 +523,26 @@ function createPassedGuideRuleEvaluation(mode) {
 // src/simulation/traderOptimization.ts
 var defaultOptions = {
   candidateMarketCount: 30,
-  monitoringMarketCount: 9,
+  monitoringMarketCount: 15,
   tradeValueLookbackCandles: 1440,
   optimizationLookbackCandles: Number.POSITIVE_INFINITY,
   minCandles: 120,
-  guideRuleMode: "ignored"
+  guideRuleMode: "ignored",
+  minPrice: 100,
+  maxPrice: 1e4
 };
-function selectTopMarketsByTradeValue(candlesByMarket, count2, lookbackCandles = defaultOptions.tradeValueLookbackCandles, minCandles = defaultOptions.minCandles) {
+function selectTopMarketsByTradeValue(candlesByMarket, count2, lookbackCandles = defaultOptions.tradeValueLookbackCandles, minCandles = defaultOptions.minCandles, minPrice = defaultOptions.minPrice, maxPrice = defaultOptions.maxPrice) {
   return Object.entries(candlesByMarket).map(([market, candles]) => ({
     market,
     tradeValue: sumRecentTradeValue(candles, lookbackCandles),
-    candleCount: candles.length
-  })).filter((rank) => rank.candleCount >= minCandles && rank.tradeValue > 0).sort((a, b) => b.tradeValue - a.tradeValue).slice(0, count2);
+    candleCount: candles.length,
+    lastPrice: candles.length > 0 ? candles[candles.length - 1].close : 0
+  })).filter((rank) => {
+    if (rank.candleCount < minCandles || rank.tradeValue <= 0) return false;
+    if (minPrice !== void 0 && rank.lastPrice < minPrice) return false;
+    if (maxPrice !== void 0 && rank.lastPrice > maxPrice) return false;
+    return true;
+  }).sort((a, b) => b.tradeValue - a.tradeValue).slice(0, count2);
 }
 function sumRecentTradeValue(candles, lookbackCandles) {
   return candles.slice(Math.max(0, candles.length - lookbackCandles)).reduce((sum, candle) => sum + candle.quoteVolume, 0);

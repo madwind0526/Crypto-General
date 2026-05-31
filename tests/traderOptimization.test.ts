@@ -69,13 +69,29 @@ describe("trader optimization", () => {
     expect(selected.map((market) => market.market)).toEqual(["KRW-HIGH", "KRW-MID"]);
   });
 
+  it("selects only markets priced from 100 through 10,000 KRW", () => {
+    const selected = selectTopMarketsByTradeValue(
+      {
+        "KRW-BELOW": createCandles("KRW-BELOW", 140, 99, 0, 10_000),
+        "KRW-MIN": createCandles("KRW-MIN", 140, 100, 0, 4_000),
+        "KRW-MAX": createCandles("KRW-MAX", 140, 10_000, 0, 3_000),
+        "KRW-ABOVE": createCandles("KRW-ABOVE", 140, 10_001, 0, 9_000),
+      },
+      30,
+      40,
+      100,
+    );
+
+    expect(selected.map((market) => market.market)).toEqual(["KRW-MAX", "KRW-MIN"]);
+  });
+
   it("optimizes each candidate market and selects monitoring markets by return", () => {
     const plan = buildTraderOptimizationPlan(
       testStrategy,
       {
-        "KRW-UP": createCandles("KRW-UP", 160, 100, 0.004, 8_000),
-        "KRW-MID": createCandles("KRW-MID", 160, 100, 0.002, 7_000),
-        "KRW-DOWN": createCandles("KRW-DOWN", 160, 100, -0.003, 9_000),
+        "KRW-UP": createCandles("KRW-UP", 160, 200, 0.004, 8_000),
+        "KRW-MID": createCandles("KRW-MID", 160, 200, 0.002, 7_000),
+        "KRW-DOWN": createCandles("KRW-DOWN", 160, 200, -0.003, 9_000),
       },
       {
         candidateMarketCount: 3,

@@ -143,14 +143,14 @@ Current implementation status:
 - `compareStrategiesByGuideMode` is connected to the dashboard summary so strict and ignored modes can be compared side by side.
 - `src/simulation/dailyOperation.ts` implements the current-position loop for hold, buy, sell, and rotate decisions.
 - `src/app/App.tsx` presents the product as a left-menu/two-pane tool surface for scenario building, reports, guideline/safety review, and five General Daily Operation Simulation screens.
-- Daily Operation screens are mapped as General-A -> momentum, General-B -> range/grid, General-C -> relative/arbitrage proxy, General-D -> re-entry, and General-E -> average-drop cycle. Each has linked Guideline O/X, Safety O/X, and WS O/X controls with a 9-chart monitoring board.
+- Daily Operation screens are mapped as General-A -> momentum, General-B -> range/grid, General-C -> relative/arbitrage proxy, General-D -> re-entry, and General-E -> average-drop cycle. Each has linked Guideline O/X, Safety O/X, and WS O/X controls with a 15-chart monitoring board.
 - Daily chart popups expose large graph, trade history, returns, and balance views for the active scenario/case.
 - Scenario/guideline import/export controls are present as UI hooks; persistence validation and applying imported files remain future work.
 - Daily Operation screens prefer `public/market/upbit-krw-1m-daily.json` when available. Baseline backtracking uses the 1-minute, 7-day cache.
 - `fetch:upbit:1m:daily` reads the current selected-symbol files, builds the selected-market union, and fetches recent 1-minute candles.
 - `paper:sim:1m:daily` runs all five General traders across Guideline/Safety cases on the 1-minute daily cache and writes summaries under `data/local/paper-trading-1m-daily/`.
 - `paper:sim:1m:daily` also writes `public/market/paper-trading-1m-daily-results.json` so the browser can use 1-minute paper trades and equity curves.
-- General refresh runs the full 1-minute top-30 optimization pipeline and selects 9 monitored markets per strategy.
+- General refresh runs the full 1-minute price-filtered top-30 optimization pipeline and selects 15 monitored markets per strategy.
 - General Scenario Report is split into General-A, General-B, General-C, General-D, and General-E sections.
 - Daily Operation cards sort by latest candle-window return and chart popups show scrolled trade history plus return/balance SVG trend graphs.
 - True grid/random parameter search and walk-forward validation are still pending.
@@ -170,9 +170,9 @@ Suggested scenario parameter groups:
 
 Required optimization workflow:
 
-- For A/B/C traders, scan all Upbit KRW markets and pick the top 30 by trading value.
+- For A/B/C traders, scan Upbit KRW markets priced from 100 KRW through 10,000 KRW and pick the top 30 by trading value.
 - Optimize each trader's parameters separately for each of the 30 markets.
-- Rank the 30 market-specific scenarios by pure return, with quality score as a tie-breaker, then select 9 markets for daily monitoring.
+- Rank the 30 market-specific scenarios by pure return, with quality score as a tie-breaker, then select 15 markets for daily monitoring.
 - During daily operation, use each market's own optimized parameters.
 - If multiple markets fire a buy signal, choose the strongest signal or the higher-quality market.
 - If a better opportunity appears while holding a position, compare expected return, risk, fees, and guide-rule alignment before rotating.
@@ -181,7 +181,7 @@ Next implementation detail:
 
 - Fetch or cache enough Upbit KRW markets to support top-30 selection.
 - Persist `TraderOptimizationPlan` outputs into `data/local/traders/<trader>/selected-symbols.<mode>.json`.
-- Add UI display for candidate rank, selected 9 markets, selected scenario, guide/safety mode, return, drawdown, and rejected guide-rule/safety signals.
+- Add UI display for candidate rank, selected 15 markets, selected scenario, guide/safety mode, return, drawdown, and rejected guide-rule/safety signals.
 
 Current implementation:
 

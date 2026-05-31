@@ -14,8 +14,8 @@ This project compares several rule-based trading scenarios on Upbit KRW market d
   - General-D: range re-entry strategy
   - General-E: average drop cycle strategy
 - Compares Guideline O/X and Safety O/X cases.
-- Selects a daily monitoring universe from high trading-value coins.
-- Displays 9 Daily Operation charts sorted by trade activity and daily paper return.
+- Selects a daily monitoring universe from 100~10,000 KRW high trading-value coins.
+- Displays 15 Daily Operation charts sorted by trade activity and daily paper return.
 - Runs 1-minute paper trading simulations and keeps trade, return, and balance summaries.
 - Supports a 24-hour marathon test with automatic daily rollover.
 
@@ -30,6 +30,8 @@ This project compares several rule-based trading scenarios on Upbit KRW market d
 ## Daily Operation Model
 
 Daily Operation uses a separate 1-minute cache for monitored markets.
+
+The default operating view is `Guideline X / Safety X`. Other Guideline/Safety options use the same 100~10,000 KRW top-30 candidate policy and the same top-15 monitoring count.
 
 At a daily start boundary:
 
@@ -51,11 +53,11 @@ The app has two related but different optimization paths. This distinction matte
 
 1. Load `data/market/upbit-krw-1m-backtracking.json`.
 2. For each General strategy, run both `Guideline O` and `Guideline X`.
-3. Rank candidate markets by recent 1-minute quote trade value.
-4. Keep the top candidate universe, currently up to 30 markets.
+3. Keep only markets priced from 100 KRW through 10,000 KRW.
+4. Rank candidate markets by recent 1-minute quote trade value and keep the top 30.
 5. For each candidate market, test that strategy's scenario/parameter presets on that market's latest 7 days of 1-minute candles.
 6. Pick the best scenario/parameter set for that market by pure return, with score used only as a tie-breaker.
-7. Sort optimized markets by return rate and persist the top 9 monitoring plan.
+7. Sort optimized markets by return rate and persist the top 15 monitoring plan.
 
 Outputs are written under `data/local/traders/<strategy>/`:
 
@@ -72,12 +74,12 @@ The return shown in Strategy Report is this per-market historical backtest resul
 `npm run paper:daily-rollover` is the 00:00 KST operating model used by the marathon loop.
 
 1. Define the previous KST day as the optimization window.
-2. Try to refresh the current Upbit KRW top 30 markets by 24-hour trading value.
+2. Try to refresh the current Upbit KRW top 30 markets priced from 100 KRW through 10,000 KRW by 24-hour trading value.
 3. Fetch/backfill 1-minute candles for those markets over the previous 24-hour window.
 4. If the previous 24-hour data is not sufficiently available, skip refit and keep the existing parameters.
 5. If the previous 24-hour data is available, re-run candidate selection and parameter optimization on that 24-hour 1-minute window.
 6. Apply a minor refit instead of full replacement: blend previous parameters and newly optimized parameters with `ROLLOVER_REFIT_PREVIOUS_WEIGHT` (default previous 70%, new 30%).
-7. Persist the refreshed top 9 daily plan under `data/local/traders/<strategy>/`.
+7. Persist the refreshed top 15 daily plan under `data/local/traders/<strategy>/`.
 8. Rebuild dashboard result JSON so the UI reads the refreshed plan.
 
 This is a conservative one-day refit step. It does not fully replace the baseline parameters when previous parameters exist; it nudges them toward the newly optimized 24-hour result. If there is no reliable previous-day window, the current plan stays active.

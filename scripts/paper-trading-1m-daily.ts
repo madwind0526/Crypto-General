@@ -1,9 +1,27 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runPaperTradingSimulation, type PaperTradingResult } from "../src/simulation/paperTrading";
+import { defaultBacktestConfig } from "../src/simulation/backtest";
 import type { TraderOptimizationPlan } from "../src/simulation/traderOptimization";
 import { strategies } from "../src/strategies";
-import type { Candle, GuideRuleMode, SafetyMode, Strategy } from "../src/types/trading";
+import type { BacktestConfig, Candle, GuideRuleMode, SafetyMode, Strategy } from "../src/types/trading";
+
+// 업비트 틱 단위 기반 단방향 slippage (시장가 주문 현실 반영)
+function upbitTickSlippage(price: number): number {
+  if (price < 10)     return 0.01  / price;
+  if (price < 100)    return 0.1   / price;
+  if (price < 500)    return 1     / price;
+  if (price < 1000)   return 5     / price;
+  if (price < 5000)   return 10    / price;
+  if (price < 10_000) return 50    / price;
+  return 100 / price;
+}
+
+const realisticConfig: BacktestConfig = {
+  ...defaultBacktestConfig,
+  slippageRate: 0,
+  dynamicSlippage: upbitTickSlippage,
+};
 
 interface MarketCachePayload {
   candleUnitMinutes?: number;
@@ -68,6 +86,7 @@ for (const strategy of strategies) {
         guideRuleMode,
         maxCandles,
         startAt,
+        config: realisticConfig,
       });
       caseResults[guideRuleMode][autoBlockMode][strategy.id] = result;
       if (autoBlockMode === "disabled") results[guideRuleMode][strategy.id] = result;

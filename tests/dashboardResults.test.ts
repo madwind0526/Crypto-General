@@ -25,7 +25,7 @@ function createPlan(selectedMarkets: TraderOptimizationPlan["selectedMarkets"]):
     strategyName: "Test Strategy",
     guideRuleMode: "ignored",
     candidateMarketCount: 30,
-    monitoringMarketCount: 9,
+    monitoringMarketCount: 15,
     candidateMarkets: [],
     optimizedMarkets: selectedMarkets,
     selectedMarkets,

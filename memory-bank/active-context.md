@@ -2,7 +2,7 @@
 
 ## Current Work
 
-Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashboard for Upbit KRW markets. The current General workflow uses 1-minute candles, 7-day baseline backtracking, top-30 candidate selection by recent trade value, and top-9 monitoring selection by optimized pure return. Daily Operation displays those 9 markets as a responsive 3x3 board.
+Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashboard for Upbit KRW markets. The current General workflow uses 1-minute candles, 7-day baseline backtracking, top-30 candidate selection by recent trade value among coins priced from 100 KRW through 10,000 KRW, and top-15 monitoring selection by optimized pure return. Daily Operation displays those 15 markets as a responsive board.
 
 ## Latest Decisions
 
@@ -16,6 +16,7 @@ Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashb
   - General-E: Average Drop Cycle.
 - The old in-repo anomaly slot was replaced by General-D. The separate `C:\Claude\Crypto-Anomaly` project owns anomaly-specific strategy behavior.
 - Default operating view: `1 minute / 6 hours`, Guideline X, Safety X, pure return-rate ranking.
+- Guideline and Safety options share the same inclusive 100~10,000 KRW top-30 candidate filter and top-15 monitoring count; the option changes signal acceptance, not the monitoring policy.
 - Baseline backtracking uses `data/market/upbit-krw-1m-backtracking.json` and `npm run persist:traders`.
 - `persist:traders` writes strict/ignored optimization plans and selected symbols under `data/local/traders/<strategy>/`.
 - `build:dashboard-results` rebuilds `public/market/dashboard-results.json` from persisted optimization plans.
@@ -39,13 +40,15 @@ Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashb
   - dashboard result generation skips empty selected plans and preserves full top-30 optimization plans;
   - Summary best-case selection uses pure return rate;
   - readable Korean trader profile strings were restored.
-- After the latest fixes, `npm run persist:traders`, `npm run build:dashboard-results`, `npm run test`, and `npm run build` were rerun. Generated dashboard results now keep 30 candidate markets, 30 optimized markets, and 9 selected markets per General strategy plan, and selected best results include trade/equity detail for Summary Safety comparison.
+- Generated dashboard results should keep up to 30 price-filtered candidate markets and 15 selected markets per General strategy plan. Selected best results include trade/equity detail for Summary Safety comparison.
 - `dashboard-results.json` now includes precomputed Guideline/Safety case comparison rows generated from the same source cache used to rehydrate the selected backtest results. The UI uses these generated rows first, avoiding a mismatch between 1-minute backtracking trades and the 5-minute dashboard display cache.
 - Rollover optimization payloads now record the source cache path and optimization window. Dashboard result generation uses that path/window when rehydrating selected backtests, so a 24-hour rollover result is not accidentally recomputed over the whole retained daily cache.
 - Backtest and paper trailing stops now use the previous high-water mark before updating with the current candle high, which avoids optimistic same-candle high-before-low assumptions.
 - WS-O intraminute locks now block repeated signal evaluation for the locked minute but still allow later tick risk checks. Risk checks are scoped to the ticked market so another market's tick cannot close an open position using stale candles. Backtest risk-rule exits also apply sell slippage to match paper trading.
-- Daily Operation polling now refreshes `dashboard-results.json` along with the 1-minute daily cache and paper results. This keeps the displayed 9-market plan aligned after the 00:00 KST rollover, and the UI keeps all 9 selected cards visible even if a candle cache is briefly missing for a market.
+- Daily Operation polling refreshes `dashboard-results.json` along with the 1-minute daily cache and paper results. This keeps the displayed 15-market plan aligned after the 00:00 KST rollover, and the UI keeps all 15 selected cards visible even if a candle cache is briefly missing for a market.
 - Crypto-Currency's dev server is pinned to `127.0.0.1:5174` to avoid colliding with the separate Crypto-Anomaly app on `5173`. The marathon watchdog now follows the Crypto-Anomaly pattern by watching the public paper-result file mtime as the primary freshness signal, with marathon status JSON as a fallback.
+- Live operation scripts are bundled for Node ESM with external packages so Node 24 can load CommonJS-backed dependencies such as `ws` and `dotenv`. On live-trader startup, persisted holdings and trade history are preserved while `totalBudget` and `budgetPerCoin` are normalized from the current 15-market runtime configuration.
+- Live-trader startup now rebuilds managed positions from the current selected-market Upbit balances before enabling the WebSocket loop. This removes dry-run-only positions during a live transition, preserves historical trades, absorbs existing selected-market Upbit holdings, and fails closed if account synchronization cannot complete.
 
 ## Important Assumptions
 
@@ -71,5 +74,5 @@ Crypto-Currency Trading is a Vite + React + TypeScript local paper-trading dashb
 1. Read `AGENTS.md`, `GUIDERULES.md`, and all files in `memory-bank/`.
 2. Use the existing Vite + React + TypeScript app skeleton.
 3. Use Upbit public data as the current data source.
-4. Preserve the current 1-minute, 7-day baseline backtracking and top-30 -> top-9 monitoring workflow unless the user changes it.
+4. Preserve the current 1-minute, 7-day baseline backtracking and price-filtered top-30 -> top-15 monitoring workflow unless the user changes it.
 5. Run `npm run test` and `npm run build` after strategy, simulation, script, or UI changes.
