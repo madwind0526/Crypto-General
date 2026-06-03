@@ -213,7 +213,7 @@ const menuSections: MenuSection[] = [
   },
   {
     title: "Live Trade",
-    items: [{ id: "live-trade", label: "General-C Live", caption: "C 전략 실매매 현황" }],
+    items: [{ id: "live-trade", label: "Live Trading" }],
   },
 ];
 
