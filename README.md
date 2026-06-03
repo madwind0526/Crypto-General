@@ -1,31 +1,34 @@
 # Crypto-Currency Trading
 
-Local-first crypto trading research and paper-simulation dashboard.
+Local-first crypto trading research, paper-simulation, and live-trading dashboard.
 
-This project compares several rule-based trading scenarios on Upbit KRW market data, selects monitoring candidates, and runs Daily Operation simulations before any real-money automation. It is experimental software and is not financial advice.
+This project compares several rule-based trading scenarios on Upbit KRW market data, selects monitoring candidates, runs Daily Operation simulations, and supports live automated trading on the Upbit exchange. It is experimental software and is not financial advice.
 
 ## What It Does
 
 - Fetches Upbit public KRW candle data.
-- Backtests five General strategies:
+- Backtests six General strategies:
   - General-A: momentum / trend following
   - General-B: range / grid mean reversion
   - General-C: statistical / relative-value style arbitrage
   - General-D: range re-entry strategy
   - General-E: average drop cycle strategy
+  - General-Sum: regime-routing meta-strategy that combines A–E signals
 - Compares Guideline O/X and Safety O/X cases.
 - Selects a daily monitoring universe from 100~10,000 KRW high trading-value coins.
 - Displays 15 Daily Operation charts sorted by trade activity and daily paper return.
 - Runs 1-minute paper trading simulations and keeps trade, return, and balance summaries.
 - Supports a 24-hour marathon test with automatic daily rollover.
+- Runs live automated trading against the real Upbit exchange via `live:trader`.
 
 ## Main Screens
 
 - `Summary`: strategy ranking and Guideline/Safety case comparison.
-- `General Scenario`: A/B/C/D/E strategy overview and import/export hooks.
+- `General Scenario`: A/B/C/D/E/Sum strategy overview and import/export hooks.
 - `General Scenario Report`: per-strategy rank and monitoring tables.
 - `Base Guideline/Safety`: common Guideline and Safety rule overview.
-- `Daily Operation`: live-style paper monitoring for General-A/B/C/D/E.
+- `Daily Operation (General-A/B/C/D/E/Sum)`: live-style paper monitoring per strategy.
+- `Live Trading`: real-time status of the live-trader process (requires `npm run live:trader`).
 
 ## Daily Operation Model
 
@@ -108,12 +111,26 @@ Daily Operation therefore differs from per-coin backtracking in several ways:
 
 ### 4. WebSocket Live Simulation
 
-WS live simulation reads the same active plans and retained candles, then compares:
+`npm run ws:live` runs WS live simulation alongside the active plans and retained candles, then compares:
 
 - `WS X`: candle-close-only behavior, intended to match the normal 1-minute paper flow.
 - `WS O`: reacts inside the current 1-minute candle when an entry/exit trigger appears, then falls back to candle-close processing if no in-minute trade occurs.
 
 WS live also keeps warm-up candles before the Daily Operation boundary, but only replays decisions from the boundary.
+
+### 5. Live Trading
+
+`npm run live:trader` connects to the real Upbit exchange and executes orders automatically based on the active General strategy plans.
+
+- Reads the active plan from `data/local/traders/general-e/selected-symbols.ignored.json` (configurable).
+- Acquires a lock file (`data/local/live-trader.lock`) to prevent duplicate instances.
+- Polls Upbit candle data and evaluates entry/exit signals at each candle boundary.
+- Executes real buy/sell orders; writes trade and status updates to `public/market/live-trade-status.json`.
+- The `Live Trading` dashboard screen shows real-time position, balance, and trade log when the process is running.
+
+Use `npm run live:trader:dry` for a dry-run mode that evaluates signals without placing real orders.
+
+> ⚠️ Live trading uses real exchange funds. Verify strategy plans, risk limits, and safety settings thoroughly before enabling real trading.
 
 ### Why Backtracking And Daily Returns Can Differ
 
@@ -189,6 +206,36 @@ Start the continuous marathon watchdog:
 npm run paper:marathon:watchdog
 ```
 
+Start WebSocket live simulation:
+
+```bash
+npm run ws:live
+```
+
+Start live trading (real orders):
+
+```bash
+npm run live:trader
+```
+
+Start live trading in dry-run mode (no real orders):
+
+```bash
+npm run live:trader:dry
+```
+
+Check live account balance:
+
+```bash
+node scripts/check-balance.mjs
+```
+
+Run General-Sum 7-day backtest comparison:
+
+```bash
+node scripts/backtest-general-sum.mjs
+```
+
 ## Data Locations
 
 - `data/market/`: local market-data cache.
@@ -196,6 +243,12 @@ npm run paper:marathon:watchdog
 - `data/local/traders/`: persisted strategy plans and per-market parameters.
 - `data/local/paper-trading-1m-daily/`: Daily Operation paper results, status, and logs.
 
-## Safety Note
+## Live Trading Safety
 
-The system is designed for backtesting and paper simulation only. Real exchange orders should remain out of scope until simulation, audit logging, risk controls, duplicate-order prevention, and emergency-stop behavior are thoroughly verified.
+Live trading is active and connects to the real Upbit exchange. The following safeguards are in place:
+
+- Lock file prevents duplicate live-trader processes.
+- Per-trade position sizing and stop-loss limits are enforced by the strategy plan.
+- Dry-run mode (`--dry-run`) evaluates signals without placing orders.
+- Emergency stop: delete `data/local/live-trader.lock` and kill the process to halt trading immediately.
+- Always review `data/local/traders/<strategy>/selected-symbols.ignored.json` before starting live trading to confirm the active coin list and risk parameters.
