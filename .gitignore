@@ -8,6 +8,7 @@ dist/
 .tmp-*.log
 .claude/
 .claire/
+memory-bank/
 data/market/*.json
 data/market/*.tmp
 data/local/**
